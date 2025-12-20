@@ -1,4 +1,5 @@
 from typing import Optional, List
+from datetime import datetime
 import sqlalchemy as sa
 import sqlalchemy.orm as so
 from app.models.base import BaseModel
@@ -16,6 +17,26 @@ class User(BaseModel):
 
     # OAuth fields
     google_id: so.Mapped[Optional[str]] = so.mapped_column(sa.String(100), unique=True, index=True, nullable=True)
+
+    telegram_chat_id: so.Mapped[Optional[str]] = so.mapped_column(
+        sa.String(100),
+        unique=True,
+        index=True,
+        nullable=True
+    )
+    telegram_username: so.Mapped[Optional[str]] = so.mapped_column(
+        sa.String(100),
+        nullable=True
+    )
+    telegram_enabled: so.Mapped[bool] = so.mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=True
+    )
+    telegram_connected_at: so.Mapped[Optional[datetime]] = so.mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True
+    )
 
     # Relationships
     trades: so.Mapped[List["Trade"]] = so.relationship(back_populates='user', cascade="all, delete-orphan")

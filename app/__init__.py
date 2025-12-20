@@ -39,12 +39,14 @@ def create_app(config_class=Config):
     from app.routes.trades import trades_bp
     from app.routes.tickers import tickers_bp
     from app.routes.tags import tags_bp
+    from app.routes.telegram import telegram_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(users_bp, url_prefix='/api/users')
     app.register_blueprint(trades_bp, url_prefix='/api/trades')
     app.register_blueprint(tickers_bp, url_prefix='/api/tickers')
     app.register_blueprint(tags_bp, url_prefix='/api/tags')
+    app.register_blueprint(telegram_bp, url_prefix='/api/telegram')
 
     # Error handlers
     from app.utils.error_handlers import register_error_handlers

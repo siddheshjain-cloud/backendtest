@@ -237,7 +237,8 @@ class TickerManager:
     def send_trade_notification(self, user, trade):
         """Send trade notification - implement as per your notification system"""
         logger.info(f"Sending trade notification to user {user.id} for trade {trade.id}")
-        # TODO: Implement actual notification sending logic
+        from app.services.telegram_service import telegram_service
+        telegram_service.send_trade_alert(user, trade)
         pass
 
     def on_ticks(self, ws, ticks):

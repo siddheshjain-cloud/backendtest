@@ -10,6 +10,12 @@ class UserSchema(Schema):
     is_admin = fields.Bool(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
+    # Telegram fields
+    telegram_enabled = fields.Bool(dump_only=True)
+    telegram_username = fields.Str(dump_only=True)
+    telegram_connected_at = fields.DateTime(dump_only=True)
+
+
 
 class UserRegistrationSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
