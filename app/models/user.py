@@ -41,6 +41,10 @@ class User(BaseModel):
     # Relationships
     trades: so.Mapped[List["Trade"]] = so.relationship(back_populates='user', cascade="all, delete-orphan")
     tags: so.Mapped[List["Tag"]] = so.relationship(back_populates="user", cascade="all, delete-orphan")
+    telegram_verifications: so.Mapped[List["TelegramVerification"]] = so.relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
