@@ -147,7 +147,7 @@ class TelegramService:
         message = f"""
 {emoji} <b>{title}!</b>
 
-<b>Symbol:</b> {trade.symbol}
+<b>Ticker:</b> {trade.symbol}
 <b>Side:</b> {trade.side}
 <b>Price:</b> ₹{price:.2f}
 <b>Current Price:</b> ₹{trade.last_price:.2f}
