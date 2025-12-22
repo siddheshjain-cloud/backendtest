@@ -145,38 +145,38 @@ class TelegramService:
             return False
 
         message = f"""
-        {emoji} <b>{title}!</b>
-        
-        <b>Symbol:</b> {trade.symbol}
-        <b>Side:</b> {trade.side}
-        <b>Price:</b> ₹{price:.2f}
-        <b>Current Price:</b> ₹{trade.last_price:.2f}
-        
-        <b>Entry:</b> ₹{trade.entry:.2f}
-        {f'<b>Stop Loss:</b> ₹{trade.stoploss:.2f}' if trade.stoploss else ''}
-        {f'<b>Target:</b> ₹{trade.target:.2f}' if trade.target else ''}
-        
-        {f'<b>Notes:</b> {trade.notes}' if trade.notes else ''}
-        """
+{emoji} <b>{title}!</b>
+
+<b>Symbol:</b> {trade.symbol}
+<b>Side:</b> {trade.side}
+<b>Price:</b> ₹{price:.2f}
+<b>Current Price:</b> ₹{trade.last_price:.2f}
+
+<b>Entry:</b> ₹{trade.entry:.2f}
+{f'<b>Stop Loss:</b> ₹{trade.stoploss:.2f}' if trade.stoploss else ''}
+{f'<b>Target:</b> ₹{trade.target:.2f}' if trade.target else ''}
+
+{f'<b>Notes:</b> {trade.notes}' if trade.notes else ''}
+"""
 
         return self.send_message(user.telegram_chat_id, message.strip())
 
     def send_welcome_message(self, chat_id: str, user_name: str) -> bool:
         """Send welcome message after successful connection"""
         message = f"""
-        🎉 <b>Welcome, {user_name}!</b>
+🎉 <b>Welcome, {user_name}!</b>        
+
+Your Telegram account has been successfully connected to Stock Price Alert.
         
-        Your Telegram account has been successfully connected to Stock Price Alert.
+You will now receive notifications when your trade alerts trigger.
         
-        You will now receive notifications when your trade alerts trigger.
-        
-        <b>Alert Types:</b>
-        🎯 Entry Hit
-        🛑 Stop Loss Hit
-        ✅ Target Hit
-        
-        You can manage your notification settings from the app.
-        """
+<b>Alert Types:</b>
+✅ Entry Hit
+🛑 Stop Loss Hit
+🎯 Target Hit
+
+You can manage your notification settings from the app.
+"""
         return self.send_message(chat_id, message.strip())
 
 
