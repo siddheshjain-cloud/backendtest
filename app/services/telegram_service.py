@@ -79,7 +79,7 @@ class TelegramService:
                 return None
 
             # Check if expired
-            if datetime.now(timezone.utc) > verification.expires_at:
+            if datetime.now(timezone.utc) > verification.expires_at.replace(tzinfo=timezone.utc):
                 return None
 
             # Get user
