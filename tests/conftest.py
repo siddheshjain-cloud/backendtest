@@ -4,6 +4,7 @@ import pytest
 from flask_jwt_extended import create_access_token
 
 from app import create_app, db
+from app.models.ticker import Ticker
 from app.models.user import User
 from config import Config
 
@@ -45,6 +46,30 @@ def user_factory(app):
         return user
 
     return create_user
+
+
+@pytest.fixture
+def ticker_factory(app):
+    def create_ticker(
+        *,
+        symbol: str = "IKIO",
+        instrument_token: int = 1,
+        exchange: str = "NSE",
+        name: str = "IKIO Technologies Limited",
+        last_price: float = 100.0,
+    ) -> Ticker:
+        ticker = Ticker(
+            symbol=symbol,
+            instrument_token=instrument_token,
+            exchange=exchange,
+            name=name,
+            last_price=last_price,
+        )
+        db.session.add(ticker)
+        db.session.commit()
+        return ticker
+
+    return create_ticker
 
 
 @pytest.fixture
