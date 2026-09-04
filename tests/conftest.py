@@ -1,11 +1,14 @@
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from flask_jwt_extended import create_access_token
 
 from app import create_app, db
 from app.models.ticker import Ticker
+from app.models.trade import Trade
 from app.models.user import User
+from app.models.utils import TradeSide, TradeStatus, TradeTimeframe, TradeType
 from config import Config
 
 
@@ -70,6 +73,49 @@ def ticker_factory(app):
         return ticker
 
     return create_ticker
+
+
+@pytest.fixture
+def trade_factory(app):
+    def create_trade(
+        *,
+        user: User,
+        ticker: Ticker,
+        side: str = TradeSide.BUY,
+        trade_type: str = TradeType.CROSSING_ABOVE,
+        status: str = TradeStatus.ACTIVE,
+        entry: float = 101.0,
+        stoploss: float | None = 99.0,
+        target: float | None = 105.0,
+        notes: str = "",
+        timeframe: str = TradeTimeframe.DAY,
+    ) -> Trade:
+        trade = Trade(
+            symbol=ticker.symbol,
+            side=side,
+            type=trade_type,
+            status=status,
+            entry=entry,
+            stoploss=stoploss,
+            target=target,
+            notes=notes,
+            timeframe=timeframe,
+            user_id=user.id,
+            ticker_id=ticker.id,
+        )
+        db.session.add(trade)
+        db.session.commit()
+        return trade
+
+    return create_trade
+
+
+@pytest.fixture
+def candle_factory():
+    def create_candle(*, high: float = 100.0, low: float = 100.0):
+        return SimpleNamespace(high=high, low=low)
+
+    return create_candle
 
 
 @pytest.fixture
