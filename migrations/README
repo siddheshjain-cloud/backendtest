@@ -1,0 +1,4 @@
+Legacy database migration baseline for the backend application.
+
+Existing databases must not be stamped or upgraded until their schema has
+been inventoried and verified equivalent to revision 20260904_01.
