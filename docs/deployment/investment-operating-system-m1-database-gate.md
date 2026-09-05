@@ -139,23 +139,20 @@ and reviewer must verify all of the following:
 If any check fails, stop. Do not generate from, stamp, or upgrade the active
 database.
 
-## Destructive downgrade warning
+## Irreversible baseline
 
-**Never run `downgrade` of the legacy baseline `20260904_01` against a shared,
-staging, or production database.**
+**The legacy baseline `20260904_01` cannot be downgraded to `base`.**
 
-Its `downgrade()` drops the six legacy tables — `trade_tags`, `trade`,
-`telegram_verification`, `tag`, `user`, `ticker` — destroying all user, ticker,
-trade, tag, and Telegram data. It is not a rollback mechanism.
+It is SPA's irreversible migration floor. Its `downgrade()` raises a migration
+error before making any schema change, protecting the six legacy tables —
+`trade_tags`, `trade`, `telegram_verification`, `tag`, `user`, `ticker`.
 
 On a verified existing deployment the baseline is applied by `stamp`, which
 writes only the `alembic_version` marker and creates no table. Downgrading it
-would therefore drop tables that this revision never created on that database.
+must not make the version state claim `base` while those legacy tables remain.
 
-- Baseline `downgrade()` is permitted on disposable local and CI databases only.
 - To roll back Milestone 1, downgrade the additive revision `20260904_02`, which
-  drops only the new Investment Operating System tables and leaves the legacy
-  schema intact.
+  drops only the new Investment Operating System tables, only to this baseline.
 - To restore the legacy schema or its data, use the verified backup this gate
   requires. The backup must be retained until rollback/restore acceptance is
   signed.

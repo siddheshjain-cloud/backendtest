@@ -48,6 +48,10 @@ def upgrade_database(database_url: str, revision: str) -> None:
     command.upgrade(_alembic_config(database_url), revision)
 
 
+def downgrade_database(database_url: str, revision: str) -> None:
+    command.downgrade(_alembic_config(database_url), revision)
+
+
 def schema_snapshot(database_url: str, table_names: set[str]) -> dict:
     engine = sa.create_engine(database_url)
     try:
