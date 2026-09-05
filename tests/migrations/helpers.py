@@ -57,23 +57,10 @@ def schema_snapshot(database_url: str, table_names: set[str]) -> dict:
         if missing_tables:
             raise AssertionError(f"Missing tables: {sorted(missing_tables)}")
 
-        snapshot = {}
-        for table_name in sorted(table_names):
-            table = inspect_table(inspector, table_name)
-            table["check_constraints"] = sorted(
-                (
-                    {
-                        "name": constraint.get("name"),
-                        "sqltext": constraint.get("sqltext"),
-                    }
-                    for constraint in inspector.get_check_constraints(table_name)
-                ),
-                key=lambda constraint: (
-                    constraint["name"] or "",
-                    constraint["sqltext"] or "",
-                ),
-            )
-            snapshot[table_name] = table
-        return snapshot
+        # inspect_table already reports sorted check constraints.
+        return {
+            table_name: inspect_table(inspector, table_name)
+            for table_name in sorted(table_names)
+        }
     finally:
         engine.dispose()

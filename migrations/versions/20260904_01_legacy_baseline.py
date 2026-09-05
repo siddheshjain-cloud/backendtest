@@ -3,6 +3,32 @@
 Revision ID: 20260904_01
 Revises:
 Create Date: 2026-09-04
+
+=============================================================================
+DESTRUCTIVE DOWNGRADE WARNING -- READ BEFORE RUNNING ANY DOWNGRADE
+=============================================================================
+
+``downgrade()`` DROPS the six legacy application tables:
+
+    trade_tags, trade, telegram_verification, tag, user, ticker
+
+On an existing populated database this DESTROYS ALL user, ticker, trade, tag
+and Telegram data. It is NOT a rollback mechanism.
+
+This revision is a baseline: on a verified existing deployment it is applied by
+``stamp``, which writes only the ``alembic_version`` marker and creates nothing.
+Downgrading it therefore removes tables this revision never created on that
+database.
+
+Permitted use of ``downgrade()``:
+  - disposable local or CI databases only.
+
+Never run on a shared, staging or production database. To roll back Milestone 1,
+downgrade the ADDITIVE revision (``20260904_02``), which drops only the new
+Investment Operating System tables and leaves the legacy schema intact. If the
+legacy schema itself must be restored, use the verified backup required by
+``docs/deployment/investment-operating-system-m1-database-gate.md``.
+=============================================================================
 """
 
 from typing import Sequence, Union
@@ -193,6 +219,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """DESTRUCTIVE: drops all six legacy tables and every row in them.
+
+    Disposable local/CI databases only. See the module docstring. This is not a
+    production rollback path; restore from the gate-required backup instead.
+    """
     op.drop_table("trade_tags")
     op.drop_table("trade")
     op.drop_table("telegram_verification")

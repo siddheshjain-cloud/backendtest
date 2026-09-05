@@ -21,6 +21,7 @@ def inspect_schema(database_url: str) -> dict[str, object]:
             "driver": engine.dialect.driver,
             "tables": tables,
             "alembic_version": inspect_alembic_version(engine, tables),
+            "native_enums": inspect_native_enums(inspector),
         }
     finally:
         engine.dispose()
@@ -68,6 +69,8 @@ def inspect_table(inspector: Inspector, name: str) -> dict[str, object]:
         for index in inspector.get_indexes(name)
     ]
 
+    check_constraints = inspect_check_constraints(inspector, name)
+
     foreign_keys.sort(key=_metadata_sort_key)
     unique_constraints.sort(key=_metadata_sort_key)
     indexes.sort(key=_metadata_sort_key)
@@ -81,7 +84,62 @@ def inspect_table(inspector: Inspector, name: str) -> dict[str, object]:
         "foreign_keys": foreign_keys,
         "unique_constraints": unique_constraints,
         "indexes": indexes,
+        "check_constraints": check_constraints,
     }
+
+
+def inspect_check_constraints(
+    inspector: Inspector, name: str
+) -> list[dict[str, object]]:
+    """Read CHECK constraints, where non-native enums keep their allowed values.
+
+    Dialects that cannot reflect CHECK constraints raise ``NotImplementedError``;
+    report an empty list rather than failing the whole inventory.
+    """
+    try:
+        reflected = inspector.get_check_constraints(name)
+    except NotImplementedError:
+        return []
+
+    constraints = [
+        {
+            "name": constraint.get("name"),
+            "sqltext": constraint.get("sqltext"),
+        }
+        for constraint in reflected
+    ]
+    constraints.sort(key=_metadata_sort_key)
+    return constraints
+
+
+def inspect_native_enums(inspector: Inspector) -> dict[str, object]:
+    """Read native enum type definitions when the dialect has a type catalogue.
+
+    Only some dialects (notably PostgreSQL) expose ``get_enums``. When the
+    dialect has no native enum catalogue, report that fact explicitly instead of
+    inventing values; on those dialects the allowed values are visible through
+    the per-table CHECK constraints.
+    """
+    get_enums = getattr(inspector, "get_enums", None)
+    if get_enums is None:
+        return {"supported": False, "enums": []}
+
+    try:
+        reflected = get_enums()
+    except (NotImplementedError, AttributeError):
+        return {"supported": False, "enums": []}
+
+    enums = [
+        {
+            "name": enum.get("name"),
+            "schema": enum.get("schema"),
+            # Label order is part of the type definition and is preserved.
+            "labels": list(enum.get("labels") or []),
+        }
+        for enum in reflected
+    ]
+    enums.sort(key=lambda enum: (enum["schema"] or "", enum["name"] or ""))
+    return {"supported": True, "enums": enums}
 
 
 def inspect_alembic_version(

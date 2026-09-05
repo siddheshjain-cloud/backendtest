@@ -79,6 +79,20 @@ python scripts/inspect_database_schema.py --database-url-env DATABASE_URL --outp
 The output must be reviewed and redacted before it enters the controlled
 deployment record.
 
+The inventory reports `check_constraints` for every table and a top-level
+`native_enums` section. `native_enums` is `{"supported": false, "enums": []}` on
+dialects with no native enum catalogue, which states the absence explicitly
+rather than implying no enum types exist.
+
+Enum representation is dialect-dependent and must be reviewed accordingly. The
+legacy models declare `sa.Enum` without `native_enum=False`, and SQLAlchemy
+defaults `create_constraint` to false. On SQLite the enum columns are therefore
+plain `VARCHAR` with no CHECK constraint, so the allowed values appear nowhere
+in the reflected schema. On a dialect with a native enum catalogue the same
+models create real enum types, which `native_enums` reports. Enum drift must
+therefore be reviewed against the actual deployment dialect; a SQLite inventory
+cannot evidence it.
+
 ### Model-to-schema comparison and drift disposition
 
 - Model-to-schema comparison result against the six-table legacy baseline:
@@ -124,3 +138,36 @@ and reviewer must verify all of the following:
 
 If any check fails, stop. Do not generate from, stamp, or upgrade the active
 database.
+
+## Destructive downgrade warning
+
+**Never run `downgrade` of the legacy baseline `20260904_01` against a shared,
+staging, or production database.**
+
+Its `downgrade()` drops the six legacy tables — `trade_tags`, `trade`,
+`telegram_verification`, `tag`, `user`, `ticker` — destroying all user, ticker,
+trade, tag, and Telegram data. It is not a rollback mechanism.
+
+On a verified existing deployment the baseline is applied by `stamp`, which
+writes only the `alembic_version` marker and creates no table. Downgrading it
+would therefore drop tables that this revision never created on that database.
+
+- Baseline `downgrade()` is permitted on disposable local and CI databases only.
+- To roll back Milestone 1, downgrade the additive revision `20260904_02`, which
+  drops only the new Investment Operating System tables and leaves the legacy
+  schema intact.
+- To restore the legacy schema or its data, use the verified backup this gate
+  requires. The backup must be retained until rollback/restore acceptance is
+  signed.
+
+## Migration target resolution
+
+Alembic resolves its target database from the running Flask application's
+configured `SQLALCHEMY_DATABASE_URI`; `migrations/alembic.ini` intentionally
+contains no `sqlalchemy.url`. Always run stamp, upgrade, and `db current`
+through the application, for example `flask --app main:app db current`, so the
+command reports on the intended database. If no target resolves, the command
+fails with an explicit error rather than silently operating on a scratch
+in-memory database. Never add a deployment URL or credentials to `alembic.ini`
+or any other tracked file; supply `DATABASE_URL` through the approved
+secret-management channel at execution time.
