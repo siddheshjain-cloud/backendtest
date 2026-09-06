@@ -5,6 +5,11 @@ import pytest
 from flask_jwt_extended import create_access_token
 
 from app import create_app, db
+from app.models.entitlement import (
+    INVESTMENT_RESEARCH_PRODUCT_CODE,
+    UserEntitlement,
+)
+from app.models.research_types import EntitlementStatus, ResearchTier
 from app.models.ticker import Ticker
 from app.models.trade import Trade
 from app.models.user import User
@@ -139,4 +144,14 @@ def free_user(user_factory):
 
 @pytest.fixture
 def premium_user(user_factory):
-    return user_factory(email="premium@example.com")
+    user = user_factory(email="premium@example.com")
+    db.session.add(
+        UserEntitlement(
+            user_id=user.id,
+            product_code=INVESTMENT_RESEARCH_PRODUCT_CODE,
+            tier=ResearchTier.PREMIUM,
+            status=EntitlementStatus.ACTIVE,
+        )
+    )
+    db.session.commit()
+    return user

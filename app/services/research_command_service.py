@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
 from app import db
-from app.models import BusinessGroup, Company
+from app.models import BusinessGroup, Company, User, UserEntitlement
+from app.models.entitlement import INVESTMENT_RESEARCH_PRODUCT_CODE
 from app.models.ticker import Ticker
+from app.models.research_types import EntitlementStatus, ResearchTier
 from app.utils.research_errors import (
     ResearchConflictError,
     ResearchNotFoundError,
@@ -30,9 +34,16 @@ _COMPANY_WRITABLE_FIELDS = {
     "business_group_source_reference",
 }
 
+_ENTITLEMENT_WRITABLE_FIELDS = {
+    "tier",
+    "status",
+    "valid_from",
+    "valid_until",
+}
+
 
 class ResearchCommandService:
-    """Owns M1 company identity validation, transactions, and rollbacks."""
+    """Owns M1 domain validation, transactions, and rollbacks."""
 
     @classmethod
     def create_company(cls, payload: dict, actor_user_id: str) -> Company:
@@ -97,6 +108,50 @@ class ResearchCommandService:
         return company
 
     @classmethod
+    def upsert_entitlement(
+        cls, user_id: str, payload: dict, actor_user_id: str
+    ) -> UserEntitlement:
+        """Create or update the unique INVESTMENT_RESEARCH entitlement row."""
+
+        del actor_user_id  # actor enforcement arrives with later tasks.
+        values = cls._build_entitlement_values(payload)
+
+        if db.session.get(User, user_id) is None:
+            raise ResearchNotFoundError(
+                "user_not_found", "User was not found"
+            )
+
+        entitlement = db.session.scalar(
+            sa.select(UserEntitlement)
+            .where(
+                UserEntitlement.user_id == user_id,
+                UserEntitlement.product_code
+                == INVESTMENT_RESEARCH_PRODUCT_CODE,
+            )
+            .with_for_update()
+        )
+        if entitlement is None:
+            entitlement = UserEntitlement(
+                user_id=user_id,
+                product_code=INVESTMENT_RESEARCH_PRODUCT_CODE,
+                **values,
+            )
+            db.session.add(entitlement)
+        else:
+            for field, value in values.items():
+                setattr(entitlement, field, value)
+
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            raise ResearchConflictError(
+                "entitlement_conflict",
+                "User entitlement already exists",
+            ) from None
+        return entitlement
+
+    @classmethod
     def _build_company_values(cls, payload: dict) -> dict:
         cls._reject_unknown_fields(payload)
         values = {
@@ -127,6 +182,32 @@ class ResearchCommandService:
         cls._validate_group_evidence(values)
         return values
 
+    @classmethod
+    def _build_entitlement_values(cls, payload: dict) -> dict:
+        cls._reject_unknown_entitlement_fields(payload)
+        return {
+            "tier": cls._closed_entitlement_value(
+                payload.get("tier"),
+                "tier",
+                (ResearchTier.FREE, ResearchTier.PREMIUM),
+            ),
+            "status": cls._closed_entitlement_value(
+                payload.get("status"),
+                "status",
+                (
+                    EntitlementStatus.ACTIVE,
+                    EntitlementStatus.INACTIVE,
+                    EntitlementStatus.REVOKED,
+                ),
+            ),
+            "valid_from": cls._optional_utc_datetime(
+                payload.get("valid_from"), "valid_from"
+            ),
+            "valid_until": cls._optional_utc_datetime(
+                payload.get("valid_until"), "valid_until"
+            ),
+        }
+
     @staticmethod
     def _reject_unknown_fields(payload: dict) -> None:
         unknown = sorted(set(payload) - _COMPANY_WRITABLE_FIELDS)
@@ -134,6 +215,36 @@ class ResearchCommandService:
             raise ResearchValidationError(
                 {field: ["Unknown field"] for field in unknown}
             )
+
+    @staticmethod
+    def _reject_unknown_entitlement_fields(payload: dict) -> None:
+        unknown = sorted(set(payload) - _ENTITLEMENT_WRITABLE_FIELDS)
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+    @staticmethod
+    def _closed_entitlement_value(
+        value: object, field: str, allowed: tuple[str, ...]
+    ) -> str:
+        if not isinstance(value, str) or value not in allowed:
+            raise ResearchValidationError(
+                {field: ["Must be one of the approved values"]}
+            )
+        return value
+
+    @staticmethod
+    def _optional_utc_datetime(
+        value: object, field: str
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise ResearchValidationError(
+                {field: ["Must be a timezone-aware UTC datetime"]}
+            )
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _required_text(value: object, field: str) -> str:
