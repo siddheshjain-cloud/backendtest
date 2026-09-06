@@ -183,3 +183,28 @@ class ResearchPoint(BaseModel):
 
     def __repr__(self) -> str:
         return f"<ResearchPoint {self.kind} {self.sort_order}>"
+
+
+def _reject_immutable_update(_mapper, _connection, target) -> None:
+    raise sa.exc.InvalidRequestError(
+        f"{type(target).__name__} is immutable after insertion"
+    )
+
+
+def _reject_immutable_delete(_mapper, _connection, target) -> None:
+    raise sa.exc.InvalidRequestError(
+        f"{type(target).__name__} is immutable and cannot be deleted"
+    )
+
+
+for _immutable_model in (ResearchRevision, ResearchPoint):
+    sa.event.listen(
+        _immutable_model,
+        "before_update",
+        _reject_immutable_update,
+    )
+    sa.event.listen(
+        _immutable_model,
+        "before_delete",
+        _reject_immutable_delete,
+    )

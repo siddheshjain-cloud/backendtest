@@ -194,87 +194,125 @@ class ResearchCommandService:
     ) -> ResearchRevision:
         """Create an immutable research revision and all points atomically."""
 
-        if db.session.get(Company, company_id) is None:
-            raise ResearchNotFoundError(
-                "company_not_found", "Company was not found"
-            )
-        if db.session.get(User, actor_user_id) is None:
-            raise ResearchNotFoundError(
-                "user_not_found", "User was not found"
-            )
-
-        values = cls._build_research_revision_values(payload)
-        points = cls._build_research_points(payload.get("points", []))
-        supplied_base = payload.get("base_revision_id")
-
-        current = cls._current_revision_locked(company_id)
-        if current is None:
-            if supplied_base is not None:
-                raise ResearchConflictError(
-                    "revision_conflict",
-                    "Research revision changed",
-                )
-            revision_number = 1
-            supersedes_revision_id = None
-            change_reason = values["change_reason"]
-            if change_reason is not None:
-                raise ResearchValidationError(
-                    {
-                        "change_reason": [
-                            "Cannot be supplied for the first revision"
-                        ]
-                    }
-                )
-        else:
-            if supplied_base is None:
-                raise ResearchValidationError(
-                    {
-                        "base_revision_id": [
-                            "The current research revision must be supplied"
-                        ]
-                    }
-                )
-            if supplied_base != current.id:
-                raise ResearchConflictError(
-                    "revision_conflict",
-                    "Research revision changed",
-                )
-            change_reason = values["change_reason"]
-            if not isinstance(change_reason, str) or not change_reason.strip():
-                raise ResearchValidationError(
-                    {
-                        "change_reason": [
-                            "Must be a non-empty reason for later revisions"
-                        ]
-                    }
-                )
-            revision_number = current.revision_number + 1
-            supersedes_revision_id = current.id
-
-        revision = ResearchRevision(
-            company_id=company_id,
-            revision_number=revision_number,
-            supersedes_revision_id=supersedes_revision_id,
-            created_by_user_id=actor_user_id,
-            **values,
-        )
-        db.session.add(revision)
-
-        for point_values in points:
-            point = ResearchPoint(
-                **point_values,
-            )
-            revision.points.append(point)
-
         try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_research_revision_values(payload)
+            points = cls._build_research_points(payload.get("points", []))
+            supplied_base = payload.get("base_revision_id")
+
+            current = cls._current_revision_locked(company_id)
+            if current is None:
+                if supplied_base is not None:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                revision_number = 1
+                supersedes_revision_id = None
+                change_reason = values["change_reason"]
+                if change_reason is not None:
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Cannot be supplied for the first revision"
+                            ]
+                        }
+                    )
+            else:
+                if supplied_base is None:
+                    raise ResearchValidationError(
+                        {
+                            "base_revision_id": [
+                                "The current research revision must be supplied"
+                            ]
+                        }
+                    )
+                if supplied_base != current.id:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                change_reason = values["change_reason"]
+                if (
+                    not isinstance(change_reason, str)
+                    or not change_reason.strip()
+                ):
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Must be a non-empty reason for later revisions"
+                            ]
+                        }
+                    )
+                revision_number = current.revision_number + 1
+                supersedes_revision_id = current.id
+
+            revision = ResearchRevision(
+                company_id=company_id,
+                revision_number=revision_number,
+                supersedes_revision_id=supersedes_revision_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(revision)
+
+            for point_values in points:
+                revision.points.append(ResearchPoint(**point_values))
+
             db.session.commit()
-        except IntegrityError:
+        except IntegrityError as error:
+            is_revision_race = cls._is_revision_number_unique_violation(error)
             db.session.rollback()
-            raise ResearchConflictError(
-                "revision_conflict",
-                "Research revision changed",
-            ) from None
+            if is_revision_race:
+                raise ResearchConflictError(
+                    "revision_conflict",
+                    "Research revision changed",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
         return revision
+
+    @staticmethod
+    def _is_revision_number_unique_violation(error: IntegrityError) -> bool:
+        """Identify only the unique race for a company's revision number."""
+
+        constraint_name = getattr(
+            getattr(error.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name is not None:
+            return constraint_name == "uq_research_revision_company_number"
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+        if (
+            getattr(error.orig, "sqlite_errorname", None)
+            != "SQLITE_CONSTRAINT_UNIQUE"
+        ):
+            return False
+
+        prefix = "UNIQUE constraint failed: "
+        message = str(error.orig)
+        if not message.startswith(prefix):
+            return False
+        columns = tuple(
+            column.strip() for column in message[len(prefix) :].split(",")
+        )
+        return columns == (
+            "research_revision.company_id",
+            "research_revision.revision_number",
+        )
 
     @staticmethod
     def _current_revision_locked(

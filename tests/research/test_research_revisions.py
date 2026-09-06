@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import db
 from app.models import Company, ResearchPoint, ResearchRevision
@@ -88,6 +89,28 @@ def _point(kind: str, sort_order: int, **overrides: object) -> dict[str, object]
     }
     point.update(overrides)
     return point
+
+
+def _revision_row(
+    *,
+    company_id: str,
+    actor_user_id: str,
+    revision_number: int,
+    supersedes_revision_id: str | None = None,
+) -> ResearchRevision:
+    return ResearchRevision(
+        company_id=company_id,
+        revision_number=revision_number,
+        supersedes_revision_id=supersedes_revision_id,
+        why_selected=f"Revision {revision_number}",
+        thesis=f"Thesis {revision_number}",
+        thesis_invalidation=f"Invalidation {revision_number}",
+        management_quality=ManagementQuality.UNASSESSED,
+        governance_status=GovernanceStatus.UNREVIEWED,
+        change_reason=None if revision_number == 1 else "Updated research",
+        effective_at=EFFECTIVE_AT,
+        created_by_user_id=actor_user_id,
+    )
 
 
 @pytest.fixture
@@ -343,6 +366,7 @@ def test_second_revision_requires_non_empty_change_reason(
             )
         assert exc_info.value.code == "validation_error"
         assert "change_reason" in exc_info.value.details
+        assert not db.session().in_transaction()
 
 
 def test_stale_base_raises_revision_conflict_without_overwriting(
@@ -374,6 +398,7 @@ def test_stale_base_raises_revision_conflict_without_overwriting(
 
     assert exc_info.value.code == "revision_conflict"
     assert exc_info.value.message == "Research revision changed"
+    assert not db.session().in_transaction()
 
     revision_numbers = db.session.scalars(
         sa.select(ResearchRevision.revision_number)
@@ -477,6 +502,7 @@ def test_invalid_child_causes_complete_atomic_rollback(
             ),
         )
 
+    assert not db.session().in_transaction()
     assert (
         db.session.scalar(
             sa.select(sa.func.count())
@@ -486,6 +512,32 @@ def test_invalid_child_causes_complete_atomic_rollback(
         == 0
     )
     assert db.session.scalar(sa.select(sa.func.count()).select_from(ResearchPoint)) == 0
+
+
+def test_unrelated_point_integrity_error_is_rolled_back_and_not_translated(
+    app, admin_user, company
+):
+    duplicate_point_order = [
+        _point(ResearchPointKind.CATALYST, 0),
+        _point(ResearchPointKind.CATALYST, 0),
+    ]
+
+    with pytest.raises(IntegrityError):
+        ResearchCommandService.create_research_revision(
+            company.id,
+            actor_user_id=admin_user.id,
+            payload=_revision_payload(points=duplicate_point_order),
+        )
+
+    assert not db.session().in_transaction()
+    assert db.session.scalar(
+        sa.select(sa.func.count())
+        .select_from(ResearchRevision)
+        .where(ResearchRevision.company_id == company.id)
+    ) == 0
+    assert db.session.scalar(
+        sa.select(sa.func.count()).select_from(ResearchPoint)
+    ) == 0
 
 
 def test_prior_revision_remains_unchanged_after_later_revision(
@@ -582,6 +634,62 @@ def test_existing_points_remain_unchanged_after_later_revision(
         )
         for p in persisted_points
     ] == first_snapshot
+
+
+def test_persisted_research_revision_cannot_be_updated(
+    app, admin_user, company
+):
+    revision = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(),
+    )
+    revision_id = revision.id
+    original_thesis = revision.thesis
+
+    revision.thesis = "Silently rewritten thesis"
+    with pytest.raises(sa.exc.InvalidRequestError, match="immutable"):
+        db.session.commit()
+    db.session.rollback()
+
+    assert db.session.get(ResearchRevision, revision_id).thesis == original_thesis
+
+
+def test_persisted_research_point_cannot_be_updated(app, admin_user, company):
+    revision = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(),
+    )
+    point = revision.points[0]
+    point_id = point.id
+    original_title = point.title
+
+    point.title = "Silently rewritten point"
+    with pytest.raises(sa.exc.InvalidRequestError, match="immutable"):
+        db.session.commit()
+    db.session.rollback()
+
+    assert db.session.get(ResearchPoint, point_id).title == original_title
+
+
+@pytest.mark.parametrize("target_name", ["revision", "point"])
+def test_persisted_research_history_cannot_be_deleted(
+    app, admin_user, company, target_name
+):
+    revision = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(),
+    )
+    target = revision if target_name == "revision" else revision.points[0]
+
+    db.session.delete(target)
+    with pytest.raises(sa.exc.InvalidRequestError, match="immutable"):
+        db.session.commit()
+    db.session.rollback()
+
+    assert db.session.get(type(target), target.id) is not None
 
 
 def test_no_update_or_delete_research_revision_commands_exist():
@@ -788,6 +896,7 @@ def test_unique_race_is_translated_to_revision_conflict(
 
     assert exc_info.value.code == "revision_conflict"
     assert exc_info.value.message == "Research revision changed"
+    assert not db.session().in_transaction()
 
     revision_numbers = db.session.scalars(
         sa.select(ResearchRevision.revision_number)
@@ -795,3 +904,114 @@ def test_unique_race_is_translated_to_revision_conflict(
         .order_by(ResearchRevision.revision_number)
     ).all()
     assert revision_numbers == [1, 2]
+
+
+def test_current_revision_is_selected_by_highest_revision_number(
+    app, admin_user, company
+):
+    first = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(
+            effective_at=datetime(2028, 1, 1, tzinfo=timezone.utc)
+        ),
+    )
+    second = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(
+            base_revision_id=first.id,
+            change_reason="Second revision",
+            effective_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        ),
+    )
+    third = ResearchCommandService.create_research_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_revision_payload(
+            base_revision_id=second.id,
+            change_reason="Third revision",
+            effective_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        ),
+    )
+
+    current = ResearchCommandService._current_revision_locked(company.id)
+
+    assert current.id == third.id
+    assert current.revision_number == 3
+
+
+def test_first_revision_unique_backstop_across_independent_sessions(
+    app, admin_user, company
+):
+    company_id = company.id
+    actor_user_id = admin_user.id
+
+    with Session(db.engine) as winner, Session(db.engine) as loser:
+        winner.add(
+            _revision_row(
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                revision_number=1,
+            )
+        )
+        winner.commit()
+
+        loser.add(
+            _revision_row(
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                revision_number=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            loser.commit()
+        loser.rollback()
+
+    assert db.session.scalar(
+        sa.select(sa.func.count())
+        .select_from(ResearchRevision)
+        .where(ResearchRevision.company_id == company_id)
+    ) == 1
+
+
+def test_same_next_revision_unique_backstop_across_independent_sessions(
+    app, admin_user, company
+):
+    company_id = company.id
+    actor_user_id = admin_user.id
+    first = ResearchCommandService.create_research_revision(
+        company_id,
+        actor_user_id=actor_user_id,
+        payload=_revision_payload(points=[]),
+    )
+    first_id = first.id
+
+    with Session(db.engine) as winner, Session(db.engine) as loser:
+        winner.add(
+            _revision_row(
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                revision_number=2,
+                supersedes_revision_id=first_id,
+            )
+        )
+        winner.commit()
+
+        loser.add(
+            _revision_row(
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                revision_number=2,
+                supersedes_revision_id=first_id,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            loser.commit()
+        loser.rollback()
+
+    assert db.session.scalars(
+        sa.select(ResearchRevision.revision_number)
+        .where(ResearchRevision.company_id == company_id)
+        .order_by(ResearchRevision.revision_number)
+    ).all() == [1, 2]
