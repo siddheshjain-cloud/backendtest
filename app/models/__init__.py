@@ -6,4 +6,5 @@ from .tag import Tag
 from .telegram_verification import TelegramVerification
 from .company import BusinessGroup, Company
 from .entitlement import UserEntitlement
+from .research import ResearchPoint, ResearchRevision
 from .utils import *
