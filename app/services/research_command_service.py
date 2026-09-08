@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +13,7 @@ from app import db
 from app.models import (
     BusinessGroup,
     Company,
+    OwnershipSnapshot,
     ResearchPoint,
     ResearchRevision,
     User,
@@ -31,6 +33,7 @@ from app.utils.research_errors import (
     ResearchNotFoundError,
     ResearchValidationError,
 )
+from app.utils.research_validation import validate_percentage
 
 
 ISIN_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
@@ -76,6 +79,14 @@ _RESEARCH_POINT_FIELDS = {
     "status",
     "target_date",
     "sort_order",
+}
+
+_OWNERSHIP_SNAPSHOT_FIELDS = {
+    "as_of_date",
+    "promoter_holding_pct",
+    "promoter_pledge_pct",
+    "notes",
+    "source_reference",
 }
 
 
@@ -281,6 +292,76 @@ class ResearchCommandService:
             db.session.rollback()
             raise
         return revision
+
+    @classmethod
+    def add_ownership_snapshot(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> OwnershipSnapshot:
+        """Persist one dated, append-only ownership snapshot atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_ownership_snapshot_values(payload)
+            snapshot = OwnershipSnapshot(
+                company_id=company_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(snapshot)
+            db.session.commit()
+        except IntegrityError as error:
+            is_duplicate_date = cls._is_ownership_snapshot_duplicate(error)
+            db.session.rollback()
+            if is_duplicate_date:
+                raise ResearchConflictError(
+                    "ownership_snapshot_conflict",
+                    "Ownership snapshot already exists",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+        return snapshot
+
+    @staticmethod
+    def _is_ownership_snapshot_duplicate(error: IntegrityError) -> bool:
+        """Identify only the unique race for a company's snapshot date."""
+
+        constraint_name = getattr(
+            getattr(error.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name is not None:
+            return constraint_name == "uq_ownership_snapshot_company_as_of"
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+        if (
+            getattr(error.orig, "sqlite_errorname", None)
+            != "SQLITE_CONSTRAINT_UNIQUE"
+        ):
+            return False
+
+        prefix = "UNIQUE constraint failed: "
+        message = str(error.orig)
+        if not message.startswith(prefix):
+            return False
+        columns = tuple(
+            column.strip() for column in message[len(prefix) :].split(",")
+        )
+        return columns == (
+            "ownership_snapshot.company_id",
+            "ownership_snapshot.as_of_date",
+        )
 
     @staticmethod
     def _is_revision_number_unique_violation(error: IntegrityError) -> bool:
@@ -519,6 +600,46 @@ class ResearchCommandService:
             ),
         }
 
+    @classmethod
+    def _build_ownership_snapshot_values(cls, payload: dict) -> dict:
+        unknown = sorted(set(payload) - _OWNERSHIP_SNAPSHOT_FIELDS)
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        promoter_holding_pct = cls._optional_percentage(
+            payload.get("promoter_holding_pct"),
+            "promoter_holding_pct",
+        )
+        promoter_pledge_pct = cls._optional_percentage(
+            payload.get("promoter_pledge_pct"),
+            "promoter_pledge_pct",
+        )
+        source_reference = cls._optional_text(
+            payload.get("source_reference"), "source_reference"
+        )
+        if (
+            promoter_holding_pct is not None or promoter_pledge_pct is not None
+        ) and source_reference is None:
+            raise ResearchValidationError(
+                {
+                    "source_reference": [
+                        "Required when either percentage is present"
+                    ]
+                }
+            )
+
+        return {
+            "as_of_date": cls._required_date(
+                payload.get("as_of_date"), "as_of_date"
+            ),
+            "promoter_holding_pct": promoter_holding_pct,
+            "promoter_pledge_pct": promoter_pledge_pct,
+            "notes": cls._optional_text(payload.get("notes"), "notes"),
+            "source_reference": source_reference,
+        }
+
     @staticmethod
     def _reject_unknown_fields(payload: dict) -> None:
         unknown = sorted(set(payload) - _COMPANY_WRITABLE_FIELDS)
@@ -566,6 +687,14 @@ class ResearchCommandService:
         return value.astimezone(timezone.utc)
 
     @staticmethod
+    def _required_date(value: object, field: str) -> date:
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise ResearchValidationError(
+                {field: ["Must be a date"]}
+            )
+        return value
+
+    @staticmethod
     def _optional_date(value: object, field: str) -> date | None:
         if value is None:
             return None
@@ -573,6 +702,13 @@ class ResearchCommandService:
             raise ResearchValidationError(
                 {field: ["Must be a date"]}
             )
+        return value
+
+    @staticmethod
+    def _optional_percentage(value: object, field: str) -> Decimal | None:
+        if value is None:
+            return None
+        validate_percentage(value, field)
         return value
 
     @staticmethod
