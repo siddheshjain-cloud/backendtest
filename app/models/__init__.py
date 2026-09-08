@@ -8,4 +8,6 @@ from .company import BusinessGroup, Company
 from .entitlement import UserEntitlement
 from .research import ResearchPoint, ResearchRevision
 from .ownership import OwnershipSnapshot
+from .governance import GovernanceFlag
+from .disclosure import CompanyDisclosure
 from .utils import *

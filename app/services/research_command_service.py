@@ -13,6 +13,8 @@ from app import db
 from app.models import (
     BusinessGroup,
     Company,
+    CompanyDisclosure,
+    GovernanceFlag,
     OwnershipSnapshot,
     ResearchPoint,
     ResearchRevision,
@@ -23,6 +25,8 @@ from app.models.entitlement import INVESTMENT_RESEARCH_PRODUCT_CODE
 from app.models.ticker import Ticker
 from app.models.research_types import (
     EntitlementStatus,
+    GovernanceFlagStatus,
+    GovernanceSeverity,
     GovernanceStatus,
     ManagementQuality,
     ResearchPointKind,
@@ -33,7 +37,10 @@ from app.utils.research_errors import (
     ResearchNotFoundError,
     ResearchValidationError,
 )
-from app.utils.research_validation import validate_percentage
+from app.utils.research_validation import (
+    validate_percentage,
+    validate_upper_slug,
+)
 
 
 ISIN_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
@@ -87,6 +94,30 @@ _OWNERSHIP_SNAPSHOT_FIELDS = {
     "promoter_pledge_pct",
     "notes",
     "source_reference",
+}
+
+_GOVERNANCE_FLAG_WRITABLE_FIELDS = {
+    "flag_type",
+    "title",
+    "severity",
+    "status",
+    "factual_evidence",
+    "source_title",
+    "source_url_or_reference",
+    "interpretation",
+    "observed_on",
+    "resolved_on",
+}
+
+_DISCLOSURE_WRITABLE_FIELDS = {
+    "event_type",
+    "event_date",
+    "title",
+    "original_source_url_or_reference",
+    "exchange_reference",
+    "significance_note",
+    "is_key",
+    "document_id",
 }
 
 
@@ -330,6 +361,203 @@ class ResearchCommandService:
             db.session.rollback()
             raise
         return snapshot
+
+    @classmethod
+    def create_governance_flag(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> GovernanceFlag:
+        """Persist one curated, sourced governance flag atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_governance_flag_values(payload)
+            flag = GovernanceFlag(
+                company_id=company_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(flag)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return flag
+
+    @classmethod
+    def update_governance_flag(
+        cls, flag_id: str, actor_user_id: str, changes: dict
+    ) -> GovernanceFlag:
+        """Correct mutable flag metadata or archive the flag."""
+
+        try:
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+            flag = db.session.get(GovernanceFlag, flag_id)
+            if flag is None:
+                raise ResearchNotFoundError(
+                    "governance_flag_not_found",
+                    "Governance flag was not found",
+                )
+
+            archive = changes.get("archived", None)
+            unknown = sorted(
+                set(changes)
+                - _GOVERNANCE_FLAG_WRITABLE_FIELDS
+                - {"archived"}
+            )
+            if unknown:
+                raise ResearchValidationError(
+                    {field: ["Unknown field"] for field in unknown}
+                )
+
+            values = {
+                field: getattr(flag, field)
+                for field in _GOVERNANCE_FLAG_WRITABLE_FIELDS
+            }
+            for field in _GOVERNANCE_FLAG_WRITABLE_FIELDS:
+                if field in changes:
+                    values[field] = cls._governance_flag_value(
+                        field, changes[field]
+                    )
+            cls._validate_governance_flag_values(values)
+
+            if archive is not None:
+                if not isinstance(archive, bool):
+                    raise ResearchValidationError(
+                        {
+                            "archived": [
+                                "Must be a boolean archive action"
+                            ]
+                        }
+                    )
+                if not archive:
+                    raise ResearchValidationError(
+                        {
+                            "archived": [
+                                "Only archival is supported; "
+                                "unarchiving is not available"
+                            ]
+                        }
+                    )
+                if flag.archived_at is None:
+                    flag.archived_at = datetime.now(timezone.utc)
+
+            for field, value in values.items():
+                setattr(flag, field, value)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return flag
+
+    @classmethod
+    def create_disclosure(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> CompanyDisclosure:
+        """Persist one manually curated company disclosure atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_disclosure_values(payload)
+            disclosure = CompanyDisclosure(
+                company_id=company_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(disclosure)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return disclosure
+
+    @classmethod
+    def update_disclosure(
+        cls, disclosure_id: str, actor_user_id: str, changes: dict
+    ) -> CompanyDisclosure:
+        """Correct mutable disclosure metadata or archive the disclosure."""
+
+        try:
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+            disclosure = db.session.get(
+                CompanyDisclosure, disclosure_id
+            )
+            if disclosure is None:
+                raise ResearchNotFoundError(
+                    "disclosure_not_found",
+                    "Company disclosure was not found",
+                )
+
+            archive = changes.get("archived", None)
+            unknown = sorted(
+                set(changes)
+                - _DISCLOSURE_WRITABLE_FIELDS
+                - {"archived"}
+            )
+            if unknown:
+                raise ResearchValidationError(
+                    {field: ["Unknown field"] for field in unknown}
+                )
+
+            values = {
+                field: getattr(disclosure, field)
+                for field in _DISCLOSURE_WRITABLE_FIELDS
+            }
+            for field in _DISCLOSURE_WRITABLE_FIELDS:
+                if field in changes:
+                    values[field] = cls._disclosure_value(
+                        field, changes[field]
+                    )
+
+            if archive is not None:
+                if not isinstance(archive, bool):
+                    raise ResearchValidationError(
+                        {
+                            "archived": [
+                                "Must be a boolean archive action"
+                            ]
+                        }
+                    )
+                if not archive:
+                    raise ResearchValidationError(
+                        {
+                            "archived": [
+                                "Only archival is supported; "
+                                "unarchiving is not available"
+                            ]
+                        }
+                    )
+                if disclosure.archived_at is None:
+                    disclosure.archived_at = datetime.now(timezone.utc)
+
+            for field, value in values.items():
+                setattr(disclosure, field, value)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return disclosure
 
     @staticmethod
     def _is_ownership_snapshot_duplicate(error: IntegrityError) -> bool:
@@ -639,6 +867,167 @@ class ResearchCommandService:
             "notes": cls._optional_text(payload.get("notes"), "notes"),
             "source_reference": source_reference,
         }
+
+    @classmethod
+    def _build_governance_flag_values(cls, payload: dict) -> dict:
+        unknown = sorted(set(payload) - _GOVERNANCE_FLAG_WRITABLE_FIELDS)
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        values = {
+            field: cls._governance_flag_value(
+                field, payload.get(field)
+            )
+            for field in _GOVERNANCE_FLAG_WRITABLE_FIELDS
+        }
+        cls._validate_governance_flag_values(values)
+        return values
+
+    @classmethod
+    def _governance_flag_value(cls, field: str, value: object) -> object:
+        if field == "severity":
+            return cls._closed_research_value(
+                value,
+                "severity",
+                (
+                    GovernanceSeverity.INFO,
+                    GovernanceSeverity.LOW,
+                    GovernanceSeverity.MEDIUM,
+                    GovernanceSeverity.HIGH,
+                    GovernanceSeverity.CRITICAL,
+                ),
+            )
+        if field == "status":
+            return cls._closed_research_value(
+                value,
+                "status",
+                (
+                    GovernanceFlagStatus.OPEN,
+                    GovernanceFlagStatus.MONITORING,
+                    GovernanceFlagStatus.RESOLVED,
+                    GovernanceFlagStatus.DISMISSED,
+                ),
+            )
+        if field in {"observed_on", "resolved_on"}:
+            return cls._optional_date(value, field)
+        if field in {
+            "flag_type",
+            "title",
+            "factual_evidence",
+            "source_url_or_reference",
+            "interpretation",
+        }:
+            return cls._required_text(value, field)
+        return cls._optional_text(value, field)
+
+    @staticmethod
+    def _validate_governance_flag_values(values: dict) -> None:
+        details: dict[str, list[str]] = {}
+        status = values["status"]
+        resolved_on = values["resolved_on"]
+        observed_on = values["observed_on"]
+
+        if status == GovernanceFlagStatus.RESOLVED:
+            if resolved_on is None:
+                details["resolved_on"] = [
+                    "Required when the flag is RESOLVED"
+                ]
+        elif resolved_on is not None:
+            details["resolved_on"] = [
+                "Only allowed when the flag is RESOLVED"
+            ]
+
+        if (
+            resolved_on is not None
+            and observed_on is not None
+            and resolved_on < observed_on
+        ):
+            details.setdefault("resolved_on", []).append(
+                "Must not precede observed_on"
+            )
+
+        if details:
+            raise ResearchValidationError(details)
+
+    @classmethod
+    def _build_disclosure_values(cls, payload: dict) -> dict:
+        unknown = sorted(set(payload) - _DISCLOSURE_WRITABLE_FIELDS)
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        return {
+            "event_type": cls._required_upper_slug(
+                payload.get("event_type"), "event_type"
+            ),
+            "event_date": cls._required_date(
+                payload.get("event_date"), "event_date"
+            ),
+            "title": cls._required_text(
+                payload.get("title"), "title"
+            ),
+            "original_source_url_or_reference": cls._required_text(
+                payload.get("original_source_url_or_reference"),
+                "original_source_url_or_reference",
+            ),
+            "exchange_reference": cls._optional_text(
+                payload.get("exchange_reference"),
+                "exchange_reference",
+            ),
+            "significance_note": cls._optional_text(
+                payload.get("significance_note"), "significance_note"
+            ),
+            "is_key": cls._boolean_value(
+                payload.get("is_key", False), "is_key"
+            ),
+            "document_id": cls._null_document_id(
+                payload.get("document_id")
+            ),
+        }
+
+    @classmethod
+    def _disclosure_value(cls, field: str, value: object) -> object:
+        if field == "event_type":
+            return cls._required_upper_slug(value, field)
+        if field == "event_date":
+            return cls._required_date(value, field)
+        if field == "title":
+            return cls._required_text(value, field)
+        if field == "original_source_url_or_reference":
+            return cls._required_text(value, field)
+        if field == "is_key":
+            return cls._boolean_value(value, field)
+        if field == "document_id":
+            return cls._null_document_id(value)
+        return cls._optional_text(value, field)
+
+    @staticmethod
+    def _required_upper_slug(value: object, field: str) -> str:
+        normalized = ResearchCommandService._required_text(value, field)
+        return validate_upper_slug(normalized, field)
+
+    @staticmethod
+    def _boolean_value(value: object, field: str) -> bool:
+        if not isinstance(value, bool):
+            raise ResearchValidationError(
+                {field: ["Must be a boolean"]}
+            )
+        return value
+
+    @staticmethod
+    def _null_document_id(value: object) -> None:
+        if value is None:
+            return None
+        raise ResearchValidationError(
+            {
+                "document_id": [
+                    "Must be null until document metadata is available"
+                ]
+            }
+        )
 
     @staticmethod
     def _reject_unknown_fields(payload: dict) -> None:
