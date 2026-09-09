@@ -353,7 +353,6 @@ def test_valuation_tables_have_exact_columns_and_constraints(app):
     }
     assert _reflected_columns("valuation_reference_line") == {
         "id": False,
-        "created_at": False,
         "valuation_revision_id": False,
         "reference_forecast_revision_id": True,
         "reference_fiscal_year": True,
@@ -418,6 +417,12 @@ def test_valuation_tables_have_exact_columns_and_constraints(app):
     }
     assert "ck_valuation_revision_number_positive" in check_names
     assert "ck_valuation_revision_discount_positive" in check_names
+
+
+def test_valuation_reference_line_has_no_created_at_column():
+    assert "created_at" not in {
+        column.name for column in ValuationReferenceLine.__table__.columns
+    }
 
 
 def test_first_valuation_revision_persists_header_and_lines(

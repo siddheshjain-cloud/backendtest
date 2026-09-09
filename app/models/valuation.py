@@ -152,6 +152,7 @@ class ValuationReferenceLine(BaseModel):
     """One immutable reference/context input owned by a valuation revision."""
 
     __tablename__ = "valuation_reference_line"
+    created_at = None
 
     valuation_revision_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("valuation_revision.id"), nullable=False
