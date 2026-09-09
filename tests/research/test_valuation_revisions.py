@@ -17,6 +17,7 @@ from decimal import Decimal
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import db
 from app.models import (
@@ -99,6 +100,134 @@ def _valuation_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+VALID_METHOD_PAYLOADS = (
+    (
+        ValuationMethod.PE,
+        {
+            "reference_lines": [
+                _reference_line(
+                    reference_metric="EPS",
+                    reference_metric_unit="INR_PER_SHARE",
+                )
+            ],
+        },
+    ),
+    (ValuationMethod.EV_EBITDA, {}),
+    (
+        ValuationMethod.PB,
+        {
+            "reference_lines": [
+                _reference_line(
+                    reference_metric="BOOK_VALUE",
+                    reference_metric_unit="INR_CRORE",
+                )
+            ],
+        },
+    ),
+    (
+        ValuationMethod.NAV,
+        {
+            "reference_lines": [
+                _reference_line(
+                    reference_metric="NAV",
+                    reference_metric_unit="INR_CRORE",
+                )
+            ],
+        },
+    ),
+    (
+        ValuationMethod.SOTP,
+        {
+            "reference_lines": [],
+            "valuation_notes": "Sum-of-the-parts aggregate basis",
+        },
+    ),
+    (
+        ValuationMethod.ASSET_VALUE,
+        {
+            "reference_lines": [],
+            "valuation_notes": "Replacement-value asset basis",
+        },
+    ),
+    (
+        ValuationMethod.UNIT_BASED,
+        {
+            "reference_lines": [
+                _reference_line(
+                    reference_metric="CAPACITY",
+                    reference_metric_unit="TONNES_PER_YEAR",
+                )
+            ],
+        },
+    ),
+    (
+        ValuationMethod.OTHER,
+        {
+            "reference_lines": [],
+            "valuation_notes": "Cross-check aggregate basis",
+        },
+    ),
+)
+
+INVALID_METHOD_PAYLOADS = (
+    (
+        ValuationMethod.PE,
+        {"reference_lines": [_reference_line(reference_metric="NET_DEBT")]},
+        "reference_metric",
+    ),
+    (ValuationMethod.EV_EBITDA, {"currency": "USD"}, "currency"),
+    (
+        ValuationMethod.PB,
+        {"reference_lines": [_reference_line(reference_metric="EBITDA")]},
+        "reference_metric",
+    ),
+    (
+        ValuationMethod.NAV,
+        {
+            "reference_lines": [
+                _reference_line(
+                    reference_metric="NAV",
+                    sort_order=0,
+                ),
+                _reference_line(
+                    reference_metric="NAV",
+                    sort_order=1,
+                ),
+            ],
+        },
+        "reference_lines",
+    ),
+    (
+        ValuationMethod.SOTP,
+        {"reference_lines": [], "valuation_notes": None},
+        "valuation_notes",
+    ),
+    (
+        ValuationMethod.ASSET_VALUE,
+        {
+            "reference_lines": [],
+            "implied_enterprise_value": None,
+            "implied_future_equity_value": None,
+            "present_value": None,
+            "valuation_notes": None,
+            "currency": None,
+            "unit": None,
+        },
+        "valuation_notes",
+    ),
+    (
+        ValuationMethod.UNIT_BASED,
+        {"reference_lines": []},
+        "reference_lines",
+    ),
+    (
+        ValuationMethod.OTHER,
+        {"reference_lines": [], "valuation_notes": "   "},
+        "valuation_notes",
+    ),
+)
 
 
 def _forecast_line(
@@ -401,6 +530,56 @@ def test_valuation_method_is_a_controlled_classification(
         )
     assert exc_info.value.code == "validation_error"
     assert "valuation_method" in exc_info.value.details
+
+
+@pytest.mark.parametrize(
+    ("method", "overrides"),
+    VALID_METHOD_PAYLOADS,
+    ids=[method for method, _overrides in VALID_METHOD_PAYLOADS],
+)
+def test_each_valuation_method_accepts_a_valid_revision(
+    app, admin_user, company, method, overrides
+):
+    revision = ResearchCommandService.create_valuation_revision(
+        company.id,
+        actor_user_id=admin_user.id,
+        payload=_valuation_payload(
+            valuation_method=method,
+            **overrides,
+        ),
+    )
+
+    assert revision.valuation_method == method
+    assert revision.revision_number == 1
+    assert db.session.get(ValuationRevision, revision.id) is not None
+
+
+@pytest.mark.parametrize(
+    ("method", "overrides", "field"),
+    INVALID_METHOD_PAYLOADS,
+    ids=[
+        f"{method}_rejects_{field}"
+        for method, _overrides, field in INVALID_METHOD_PAYLOADS
+    ],
+)
+def test_each_valuation_method_rejects_required_invalid_input(
+    app, admin_user, company, method, overrides, field
+):
+    with pytest.raises(ResearchValidationError) as exc_info:
+        ResearchCommandService.create_valuation_revision(
+            company.id,
+            actor_user_id=admin_user.id,
+            payload=_valuation_payload(
+                valuation_method=method,
+                **overrides,
+            ),
+        )
+
+    assert field in exc_info.value.details
+    assert not db.session().in_transaction()
+    assert db.session.scalar(
+        sa.select(sa.func.count()).select_from(ValuationRevision)
+    ) == 0
 
 
 def test_zero_one_and_many_reference_lines_are_preserved(
@@ -1142,6 +1321,49 @@ def test_unique_race_is_translated_to_revision_conflict(
                 change_reason="Losing writer",
             ),
         )
+
+    assert exc_info.value.code == "revision_conflict"
+    assert exc_info.value.message == "Research revision changed"
+    assert not db.session().in_transaction()
+
+
+def test_sqlite_concurrent_writer_lock_maps_to_typed_conflict(
+    app, admin_user, company
+):
+    """A genuine SQLite writer holding the append-only stream must not leak
+    a raw database-locked error through the generic exception path."""
+
+    payload = _valuation_payload(reference_lines=[])
+
+    # The service uses Flask-SQLAlchemy's scoped session; make only that
+    # connection fail fast on lock contention so the race is deterministic.
+    db.session.connection().exec_driver_sql("PRAGMA busy_timeout = 0")
+
+    with Session(db.engine) as winner:
+        winner.add(
+            ValuationRevision(
+                company_id=company.id,
+                valuation_method=ValuationMethod.EV_EBITDA,
+                revision_number=1,
+                supersedes_revision_id=None,
+                as_of_date=AS_OF_DATE,
+                change_reason=None,
+                created_by_user_id=admin_user.id,
+                implied_future_equity_value=Decimal("1.0000"),
+                currency="INR",
+                unit="CRORE",
+            )
+        )
+        winner.flush()
+
+        with pytest.raises(ResearchConflictError) as exc_info:
+            ResearchCommandService.create_valuation_revision(
+                company.id,
+                actor_user_id=admin_user.id,
+                payload=payload,
+            )
+
+        winner.rollback()
 
     assert exc_info.value.code == "revision_conflict"
     assert exc_info.value.message == "Research revision changed"

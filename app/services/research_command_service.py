@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app import db
 from app.models import (
@@ -718,6 +718,14 @@ class ResearchCommandService:
                     "Research revision changed",
                 ) from None
             raise
+        except OperationalError as error:
+            db.session.rollback()
+            if cls._is_valuation_sqlite_busy(error):
+                raise ResearchConflictError(
+                    "revision_conflict",
+                    "Research revision changed",
+                ) from None
+            raise
         except Exception:
             db.session.rollback()
             raise
@@ -1171,6 +1179,29 @@ class ResearchCommandService:
             "valuation_revision.company_id",
             "valuation_revision.valuation_method",
             "valuation_revision.revision_number",
+        )
+
+    @staticmethod
+    def _is_valuation_sqlite_busy(error: OperationalError) -> bool:
+        """Identify SQLite lock contention on this append-only stream.
+
+        ``FOR UPDATE`` is a no-op in SQLite, so a genuine competing writer can
+        surface ``SQLITE_BUSY``/``SQLITE_LOCKED`` here instead of the unique
+        constraint violation. The M1 contract requires that contention to be
+        represented as a typed revision conflict rather than a generic DB error.
+        """
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+
+        sqlite_error = getattr(error.orig, "sqlite_errorname", None)
+        if sqlite_error in {"SQLITE_BUSY", "SQLITE_LOCKED"}:
+            return True
+
+        message = str(error.orig)
+        return (
+            "database is locked" in message
+            or "database table is locked" in message
         )
 
     @staticmethod
