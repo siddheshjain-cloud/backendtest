@@ -14,6 +14,8 @@ from app.models import (
     BusinessGroup,
     Company,
     CompanyDisclosure,
+    ForecastLine,
+    ForecastRevision,
     GovernanceFlag,
     MarketPlanRevision,
     OwnershipSnapshot,
@@ -132,6 +134,32 @@ _MARKET_PLAN_REVISION_FIELDS = {
     "rationale",
     "effective_at",
     "change_reason",
+}
+
+_FORECAST_REVISION_FIELDS = {
+    "as_of_date",
+    "assumptions",
+    "change_reason",
+}
+
+_FORECAST_LINE_FIELDS = {
+    "fiscal_year",
+    "is_estimate",
+    "revenue",
+    "ebitda",
+    "pat",
+    "ebitda_margin_pct",
+    "eps",
+    "currency",
+    "unit",
+}
+
+_FORECAST_UNITS = {
+    "ABSOLUTE",
+    "THOUSAND",
+    "LAKH",
+    "CRORE",
+    "MILLION",
 }
 
 
@@ -418,6 +446,104 @@ class ResearchCommandService:
         except IntegrityError as error:
             is_revision_race = (
                 cls._is_market_plan_revision_number_unique_violation(error)
+            )
+            db.session.rollback()
+            if is_revision_race:
+                raise ResearchConflictError(
+                    "revision_conflict",
+                    "Research revision changed",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+        return revision
+
+    @classmethod
+    def create_forecast_revision(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> ForecastRevision:
+        """Create one immutable forecast revision and lines atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_forecast_revision_values(payload)
+            lines = cls._build_forecast_lines(payload.get("lines", []))
+            supplied_base = payload.get("base_revision_id")
+
+            current = cls._current_forecast_revision_locked(company_id)
+            if current is None:
+                if supplied_base is not None:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                revision_number = 1
+                supersedes_revision_id = None
+                change_reason = values["change_reason"]
+                if change_reason is not None:
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Cannot be supplied for the first revision"
+                            ]
+                        }
+                    )
+            else:
+                if supplied_base is None:
+                    raise ResearchValidationError(
+                        {
+                            "base_revision_id": [
+                                "The current forecast revision "
+                                "must be supplied"
+                            ]
+                        }
+                    )
+                if supplied_base != current.id:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                change_reason = values["change_reason"]
+                if (
+                    not isinstance(change_reason, str)
+                    or not change_reason.strip()
+                ):
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Must be a non-empty reason for later "
+                                "revisions"
+                            ]
+                        }
+                    )
+                revision_number = current.revision_number + 1
+                supersedes_revision_id = current.id
+
+            revision = ForecastRevision(
+                company_id=company_id,
+                revision_number=revision_number,
+                supersedes_revision_id=supersedes_revision_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(revision)
+
+            for line_values in lines:
+                revision.lines.append(ForecastLine(**line_values))
+
+            db.session.commit()
+        except IntegrityError as error:
+            is_revision_race = (
+                cls._is_forecast_revision_number_unique_violation(error)
             )
             db.session.rollback()
             if is_revision_race:
@@ -794,6 +920,56 @@ class ResearchCommandService:
         )
 
     @classmethod
+    def _is_forecast_revision_number_unique_violation(
+        cls, error: IntegrityError
+    ) -> bool:
+        """Identify only the unique race for a company's forecast number."""
+
+        constraint_name = getattr(
+            getattr(error.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name is not None:
+            return (
+                constraint_name
+                == "uq_forecast_revision_company_number"
+            )
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+        if (
+            getattr(error.orig, "sqlite_errorname", None)
+            != "SQLITE_CONSTRAINT_UNIQUE"
+        ):
+            return False
+
+        prefix = "UNIQUE constraint failed: "
+        message = str(error.orig)
+        if not message.startswith(prefix):
+            return False
+        columns = tuple(
+            column.strip() for column in message[len(prefix) :].split(",")
+        )
+        return columns == (
+            "forecast_revision.company_id",
+            "forecast_revision.revision_number",
+        )
+
+    @staticmethod
+    def _current_forecast_revision_locked(
+        company_id: str,
+    ) -> ForecastRevision | None:
+        """Select the current forecast revision by highest number."""
+
+        return db.session.scalar(
+            sa.select(ForecastRevision)
+            .where(ForecastRevision.company_id == company_id)
+            .order_by(ForecastRevision.revision_number.desc())
+            .with_for_update()
+        )
+
+    @classmethod
     def _build_company_values(cls, payload: dict) -> dict:
         cls._reject_unknown_fields(payload)
         values = {
@@ -1056,6 +1232,123 @@ class ResearchCommandService:
 
         if details:
             raise ResearchValidationError(details)
+
+    @classmethod
+    def _build_forecast_revision_values(cls, payload: dict) -> dict:
+        unknown = sorted(
+            set(payload)
+            - _FORECAST_REVISION_FIELDS
+            - {"base_revision_id", "lines"}
+        )
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        return {
+            "as_of_date": cls._required_date(
+                payload.get("as_of_date"), "as_of_date"
+            ),
+            "assumptions": cls._optional_text(
+                payload.get("assumptions"), "assumptions"
+            ),
+            "change_reason": cls._optional_text(
+                payload.get("change_reason"), "change_reason"
+            ),
+        }
+
+    @classmethod
+    def _build_forecast_lines(cls, raw_lines: object) -> list[dict]:
+        if not isinstance(raw_lines, list):
+            raise ResearchValidationError(
+                {"lines": ["Must be a list of ordered lines"]}
+            )
+
+        lines = []
+        seen_fiscal_years: set[int] = set()
+        for index, raw_line in enumerate(raw_lines):
+            if not isinstance(raw_line, dict):
+                raise ResearchValidationError(
+                    {
+                        "lines": [
+                            f"Line {index} must be an object"
+                        ]
+                    }
+                )
+            unknown = sorted(set(raw_line) - _FORECAST_LINE_FIELDS)
+            if unknown:
+                raise ResearchValidationError(
+                    {
+                        "lines": [
+                            f"Line {index} has unknown fields: "
+                            + ", ".join(unknown)
+                        ]
+                    }
+                )
+
+            fiscal_year = cls._required_fiscal_year(
+                raw_line.get("fiscal_year"), "fiscal_year"
+            )
+            if fiscal_year in seen_fiscal_years:
+                raise ResearchValidationError(
+                    {
+                        "fiscal_year": [
+                            f"Fiscal year {fiscal_year} is duplicated "
+                            "inside this revision"
+                        ]
+                    }
+                )
+            seen_fiscal_years.add(fiscal_year)
+
+            currency = raw_line.get("currency", "INR")
+            if not isinstance(currency, str) or currency != "INR":
+                raise ResearchValidationError(
+                    {"currency": ["Must be INR in Milestone 1"]}
+                )
+
+            unit = raw_line.get("unit")
+            if not isinstance(unit, str) or unit not in _FORECAST_UNITS:
+                raise ResearchValidationError(
+                    {
+                        "unit": [
+                            "Must be ABSOLUTE, THOUSAND, LAKH, CRORE, "
+                            "or MILLION"
+                        ]
+                    }
+                )
+
+            revenue = cls._optional_fixed_decimal(
+                raw_line.get("revenue"), "revenue"
+            )
+            ebitda = cls._optional_fixed_decimal(
+                raw_line.get("ebitda"), "ebitda"
+            )
+            pat = cls._optional_fixed_decimal(
+                raw_line.get("pat"), "pat"
+            )
+            ebitda_margin_pct = cls._optional_percentage(
+                raw_line.get("ebitda_margin_pct"),
+                "ebitda_margin_pct",
+            )
+            eps = cls._optional_fixed_decimal(
+                raw_line.get("eps"), "eps"
+            )
+
+            line = {
+                "fiscal_year": fiscal_year,
+                "is_estimate": cls._boolean_value(
+                    raw_line.get("is_estimate"), "is_estimate"
+                ),
+                "revenue": revenue,
+                "ebitda": ebitda,
+                "pat": pat,
+                "ebitda_margin_pct": ebitda_margin_pct,
+                "eps": eps,
+                "currency": currency,
+                "unit": unit,
+            }
+            lines.append(line)
+        return lines
 
     @classmethod
     def _build_entitlement_values(cls, payload: dict) -> dict:
@@ -1353,6 +1646,34 @@ class ResearchCommandService:
         if value is None:
             return None
         validate_percentage(value, field)
+        return value
+
+    @staticmethod
+    def _required_fiscal_year(value: object, field: str) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1000
+            or value > 9999
+        ):
+            raise ResearchValidationError(
+                {field: ["Must be a four-digit integer year"]}
+            )
+        return value
+
+    @staticmethod
+    def _optional_fixed_decimal(
+        value: object, field: str
+    ) -> Decimal | None:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+        ):
+            raise ResearchValidationError(
+                {field: ["Must be a finite fixed-precision decimal"]}
+            )
         return value
 
     @staticmethod

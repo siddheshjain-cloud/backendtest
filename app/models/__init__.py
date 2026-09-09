@@ -11,4 +11,5 @@ from .ownership import OwnershipSnapshot
 from .governance import GovernanceFlag
 from .disclosure import CompanyDisclosure
 from .market_plan import MarketPlanRevision
+from .forecast import ForecastLine, ForecastRevision
 from .utils import *
