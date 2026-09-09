@@ -23,6 +23,8 @@ from app.models import (
     ResearchRevision,
     User,
     UserEntitlement,
+    ValuationReferenceLine,
+    ValuationRevision,
 )
 from app.models.entitlement import INVESTMENT_RESEARCH_PRODUCT_CODE
 from app.models.ticker import Ticker
@@ -34,6 +36,7 @@ from app.models.research_types import (
     ManagementQuality,
     ResearchPointKind,
     ResearchTier,
+    ValuationMethod,
 )
 from app.utils.research_errors import (
     ResearchConflictError,
@@ -160,6 +163,62 @@ _FORECAST_UNITS = {
     "LAKH",
     "CRORE",
     "MILLION",
+}
+
+_VALUATION_REVISION_FIELDS = {
+    "valuation_method",
+    "justified_multiple",
+    "implied_enterprise_value",
+    "net_debt",
+    "other_equity_adjustment",
+    "implied_future_equity_value",
+    "required_return_pct",
+    "discount_period_years",
+    "present_value",
+    "current_market_cap",
+    "currency",
+    "unit",
+    "valuation_notes",
+    "as_of_date",
+    "change_reason",
+}
+
+_VALUATION_REFERENCE_LINE_FIELDS = {
+    "reference_forecast_revision_id",
+    "reference_fiscal_year",
+    "reference_metric",
+    "reference_metric_value",
+    "reference_metric_unit",
+    "reference_metric_basis",
+    "sort_order",
+}
+
+_VALUATION_METHODS = {
+    ValuationMethod.PE,
+    ValuationMethod.EV_EBITDA,
+    ValuationMethod.PB,
+    ValuationMethod.NAV,
+    ValuationMethod.SOTP,
+    ValuationMethod.ASSET_VALUE,
+    ValuationMethod.UNIT_BASED,
+    ValuationMethod.OTHER,
+}
+
+_VALUATION_MONETARY_FIELDS = {
+    "implied_enterprise_value",
+    "net_debt",
+    "other_equity_adjustment",
+    "implied_future_equity_value",
+    "present_value",
+    "current_market_cap",
+}
+
+_FORECAST_METRIC_COLUMNS = {
+    "REVENUE": "revenue",
+    "EBITDA": "ebitda",
+    "PAT": "pat",
+    "EBITDA_MARGIN_PCT": "ebitda_margin_pct",
+    "EPS": "eps",
 }
 
 
@@ -544,6 +603,113 @@ class ResearchCommandService:
         except IntegrityError as error:
             is_revision_race = (
                 cls._is_forecast_revision_number_unique_violation(error)
+            )
+            db.session.rollback()
+            if is_revision_race:
+                raise ResearchConflictError(
+                    "revision_conflict",
+                    "Research revision changed",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+        return revision
+
+    @classmethod
+    def create_valuation_revision(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> ValuationRevision:
+        """Create one immutable valuation revision and lines atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_valuation_revision_values(payload)
+            method = values["valuation_method"]
+            lines = cls._build_valuation_reference_lines(
+                company_id, payload.get("reference_lines", [])
+            )
+            cls._validate_valuation_header_values(values)
+            cls._validate_valuation_method_values(method, values, lines)
+            supplied_base = payload.get("base_revision_id")
+
+            current = cls._current_valuation_revision_locked(
+                company_id, method
+            )
+            if current is None:
+                if supplied_base is not None:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                revision_number = 1
+                supersedes_revision_id = None
+                change_reason = values["change_reason"]
+                if change_reason is not None:
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Cannot be supplied for the first revision"
+                            ]
+                        }
+                    )
+            else:
+                if supplied_base is None:
+                    raise ResearchValidationError(
+                        {
+                            "base_revision_id": [
+                                "The current valuation revision "
+                                "must be supplied"
+                            ]
+                        }
+                    )
+                if supplied_base != current.id:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                change_reason = values["change_reason"]
+                if (
+                    not isinstance(change_reason, str)
+                    or not change_reason.strip()
+                ):
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Must be a non-empty reason for later "
+                                "revisions"
+                            ]
+                        }
+                    )
+                revision_number = current.revision_number + 1
+                supersedes_revision_id = current.id
+
+            revision = ValuationRevision(
+                company_id=company_id,
+                revision_number=revision_number,
+                supersedes_revision_id=supersedes_revision_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(revision)
+
+            for line_values in lines:
+                revision.reference_lines.append(
+                    ValuationReferenceLine(**line_values)
+                )
+
+            db.session.commit()
+        except IntegrityError as error:
+            is_revision_race = (
+                cls._is_valuation_revision_number_unique_violation(error)
             )
             db.session.rollback()
             if is_revision_race:
@@ -970,6 +1136,61 @@ class ResearchCommandService:
         )
 
     @classmethod
+    def _is_valuation_revision_number_unique_violation(
+        cls, error: IntegrityError
+    ) -> bool:
+        """Identify only the unique race for one valuation method stream."""
+
+        constraint_name = getattr(
+            getattr(error.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name is not None:
+            return (
+                constraint_name
+                == "uq_valuation_revision_company_method_number"
+            )
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+        if (
+            getattr(error.orig, "sqlite_errorname", None)
+            != "SQLITE_CONSTRAINT_UNIQUE"
+        ):
+            return False
+
+        prefix = "UNIQUE constraint failed: "
+        message = str(error.orig)
+        if not message.startswith(prefix):
+            return False
+        columns = tuple(
+            column.strip() for column in message[len(prefix) :].split(",")
+        )
+        return columns == (
+            "valuation_revision.company_id",
+            "valuation_revision.valuation_method",
+            "valuation_revision.revision_number",
+        )
+
+    @staticmethod
+    def _current_valuation_revision_locked(
+        company_id: str,
+        valuation_method: str,
+    ) -> ValuationRevision | None:
+        """Select the current valuation revision for one method stream."""
+
+        return db.session.scalar(
+            sa.select(ValuationRevision)
+            .where(
+                ValuationRevision.company_id == company_id,
+                ValuationRevision.valuation_method == valuation_method,
+            )
+            .order_by(ValuationRevision.revision_number.desc())
+            .with_for_update()
+        )
+
+    @classmethod
     def _build_company_values(cls, payload: dict) -> dict:
         cls._reject_unknown_fields(payload)
         values = {
@@ -1351,6 +1572,333 @@ class ResearchCommandService:
         return lines
 
     @classmethod
+    def _build_valuation_revision_values(cls, payload: dict) -> dict:
+        unknown = sorted(
+            set(payload)
+            - _VALUATION_REVISION_FIELDS
+            - {"base_revision_id", "reference_lines"}
+        )
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        method = cls._closed_research_value(
+            payload.get("valuation_method"),
+            "valuation_method",
+            tuple(_VALUATION_METHODS),
+        )
+
+        currency = cls._optional_text(payload.get("currency"), "currency")
+        if currency is not None and currency != "INR":
+            raise ResearchValidationError(
+                {"currency": ["Must be INR in Milestone 1"]}
+            )
+
+        unit = cls._optional_text(payload.get("unit"), "unit")
+        if unit is not None and unit not in _FORECAST_UNITS:
+            raise ResearchValidationError(
+                {
+                    "unit": [
+                        "Must be ABSOLUTE, THOUSAND, LAKH, CRORE, "
+                        "or MILLION"
+                    ]
+                }
+            )
+
+        return {
+            "valuation_method": method,
+            "justified_multiple": cls._optional_fixed_decimal(
+                payload.get("justified_multiple"), "justified_multiple"
+            ),
+            "implied_enterprise_value": cls._optional_fixed_decimal(
+                payload.get("implied_enterprise_value"),
+                "implied_enterprise_value",
+            ),
+            "net_debt": cls._optional_fixed_decimal(
+                payload.get("net_debt"), "net_debt"
+            ),
+            "other_equity_adjustment": cls._optional_fixed_decimal(
+                payload.get("other_equity_adjustment"),
+                "other_equity_adjustment",
+            ),
+            "implied_future_equity_value": cls._optional_fixed_decimal(
+                payload.get("implied_future_equity_value"),
+                "implied_future_equity_value",
+            ),
+            "required_return_pct": cls._optional_fixed_decimal(
+                payload.get("required_return_pct"), "required_return_pct"
+            ),
+            "discount_period_years": cls._optional_positive_decimal(
+                payload.get("discount_period_years"),
+                "discount_period_years",
+            ),
+            "present_value": cls._optional_fixed_decimal(
+                payload.get("present_value"), "present_value"
+            ),
+            "current_market_cap": cls._optional_fixed_decimal(
+                payload.get("current_market_cap"), "current_market_cap"
+            ),
+            "currency": currency,
+            "unit": unit,
+            "valuation_notes": cls._optional_text(
+                payload.get("valuation_notes"), "valuation_notes"
+            ),
+            "as_of_date": cls._required_date(
+                payload.get("as_of_date"), "as_of_date"
+            ),
+            "change_reason": cls._optional_text(
+                payload.get("change_reason"), "change_reason"
+            ),
+        }
+
+    @staticmethod
+    def _validate_valuation_header_values(values: dict) -> None:
+        details: dict[str, list[str]] = {}
+        conclusion_fields = (
+            "implied_enterprise_value",
+            "implied_future_equity_value",
+            "present_value",
+            "valuation_notes",
+        )
+        if not any(values[field] is not None for field in conclusion_fields):
+            details["valuation_notes"] = [
+                "A meaningful valuation conclusion is required"
+            ]
+
+        has_monetary_value = any(
+            values[field] is not None
+            for field in _VALUATION_MONETARY_FIELDS
+        )
+        if has_monetary_value:
+            if values["currency"] is None:
+                details["currency"] = [
+                    "Required when a monetary value is present"
+                ]
+            if values["unit"] is None:
+                details["unit"] = [
+                    "Required when a monetary value is present"
+                ]
+
+        if details:
+            raise ResearchValidationError(details)
+
+    @classmethod
+    def _build_valuation_reference_lines(
+        cls, company_id: str, raw_lines: object
+    ) -> list[dict]:
+        if not isinstance(raw_lines, list):
+            raise ResearchValidationError(
+                {"reference_lines": ["Must be a list of ordered lines"]}
+            )
+
+        lines = []
+        seen_sort_orders: set[int] = set()
+        for index, raw_line in enumerate(raw_lines):
+            if not isinstance(raw_line, dict):
+                raise ResearchValidationError(
+                    {
+                        "reference_lines": [
+                            f"Line {index} must be an object"
+                        ]
+                    }
+                )
+            unknown = sorted(
+                set(raw_line) - _VALUATION_REFERENCE_LINE_FIELDS
+            )
+            if unknown:
+                raise ResearchValidationError(
+                    {
+                        "reference_lines": [
+                            f"Line {index} has unknown fields: "
+                            + ", ".join(unknown)
+                        ]
+                    }
+                )
+
+            metric = cls._required_upper_slug(
+                raw_line.get("reference_metric"), "reference_metric"
+            )
+            value = cls._required_fixed_decimal(
+                raw_line.get("reference_metric_value"),
+                "reference_metric_value",
+            )
+            unit = cls._required_upper_slug(
+                raw_line.get("reference_metric_unit"),
+                "reference_metric_unit",
+            )
+            basis = cls._required_text(
+                raw_line.get("reference_metric_basis"),
+                "reference_metric_basis",
+            )
+            sort_order = cls._non_negative_int(
+                raw_line.get("sort_order"), "sort_order"
+            )
+            if sort_order in seen_sort_orders:
+                raise ResearchValidationError(
+                    {
+                        "sort_order": [
+                            f"Sort order {sort_order} is duplicated "
+                            "inside this revision"
+                        ]
+                    }
+                )
+            seen_sort_orders.add(sort_order)
+
+            forecast_revision_id = cls._optional_text(
+                raw_line.get("reference_forecast_revision_id"),
+                "reference_forecast_revision_id",
+            )
+            fiscal_year_value = raw_line.get("reference_fiscal_year")
+            fiscal_year = (
+                None
+                if fiscal_year_value is None
+                else cls._required_fiscal_year(
+                    fiscal_year_value, "reference_fiscal_year"
+                )
+            )
+            if forecast_revision_id is not None and fiscal_year is None:
+                raise ResearchValidationError(
+                    {
+                        "reference_fiscal_year": [
+                            "Required when a forecast revision is referenced"
+                        ]
+                    }
+                )
+
+            if forecast_revision_id is not None:
+                cls._validate_valuation_forecast_link(
+                    company_id,
+                    forecast_revision_id,
+                    fiscal_year,
+                    metric,
+                )
+
+            lines.append(
+                {
+                    "reference_forecast_revision_id": forecast_revision_id,
+                    "reference_fiscal_year": fiscal_year,
+                    "reference_metric": metric,
+                    "reference_metric_value": value,
+                    "reference_metric_unit": unit,
+                    "reference_metric_basis": basis,
+                    "sort_order": sort_order,
+                }
+            )
+        return lines
+
+    @classmethod
+    def _validate_valuation_forecast_link(
+        cls,
+        company_id: str,
+        forecast_revision_id: str,
+        fiscal_year: int | None,
+        metric: str,
+    ) -> None:
+        forecast_revision = db.session.get(
+            ForecastRevision, forecast_revision_id
+        )
+        if forecast_revision is None:
+            raise ResearchNotFoundError(
+                "forecast_revision_not_found",
+                "Forecast revision was not found",
+            )
+        if forecast_revision.company_id != company_id:
+            raise ResearchValidationError(
+                {
+                    "reference_forecast_revision_id": [
+                        "Must belong to the same company"
+                    ]
+                }
+            )
+
+        line = db.session.scalar(
+            sa.select(ForecastLine).where(
+                ForecastLine.forecast_revision_id == forecast_revision.id,
+                ForecastLine.fiscal_year == fiscal_year,
+            )
+        )
+        if line is None:
+            raise ResearchValidationError(
+                {
+                    "reference_fiscal_year": [
+                        "Referenced fiscal-year line does not exist"
+                    ]
+                }
+            )
+
+        column_name = _FORECAST_METRIC_COLUMNS.get(metric)
+        if column_name is None or getattr(line, column_name) is None:
+            raise ResearchValidationError(
+                {
+                    "reference_metric": [
+                        f"{metric} is not stored in the referenced "
+                        "forecast line"
+                    ]
+                }
+            )
+
+    @classmethod
+    def _validate_valuation_method_values(
+        cls,
+        method: str,
+        values: dict,
+        lines: list[dict],
+    ) -> None:
+        details: dict[str, list[str]] = {}
+        metrics = [line["reference_metric"] for line in lines]
+
+        if method == ValuationMethod.PE:
+            invalid_metrics = sorted(
+                {metric for metric in metrics if metric not in {"EPS", "PAT"}}
+            )
+            if invalid_metrics:
+                details["reference_metric"] = [
+                    "PE may reference only EPS or PAT"
+                ]
+        elif method == ValuationMethod.PB:
+            invalid_metrics = sorted(
+                {
+                    metric
+                    for metric in metrics
+                    if metric not in {"BOOK_VALUE", "BOOK_VALUE_PER_SHARE"}
+                }
+            )
+            if invalid_metrics:
+                details["reference_metric"] = [
+                    "PB may reference only BOOK_VALUE or "
+                    "BOOK_VALUE_PER_SHARE"
+                ]
+        elif method == ValuationMethod.NAV:
+            invalid_metrics = sorted(
+                {metric for metric in metrics if metric != "NAV"}
+            )
+            if len(lines) > 1:
+                details["reference_lines"] = [
+                    "NAV may contain at most one NAV reference line"
+                ]
+            if invalid_metrics:
+                details["reference_metric"] = [
+                    "NAV may reference only NAV"
+                ]
+        elif method == ValuationMethod.UNIT_BASED:
+            if not lines:
+                details["reference_lines"] = [
+                    "At least one reference line is required for UNIT_BASED"
+                ]
+
+        if method in {ValuationMethod.SOTP, ValuationMethod.OTHER}:
+            notes = values["valuation_notes"]
+            if not isinstance(notes, str) or not notes.strip():
+                details["valuation_notes"] = [
+                    f"{method} requires valuation_notes to explain the "
+                    "methodology or aggregate basis"
+                ]
+
+        if details:
+            raise ResearchValidationError(details)
+
+    @classmethod
     def _build_entitlement_values(cls, payload: dict) -> dict:
         cls._reject_unknown_entitlement_fields(payload)
         return {
@@ -1667,6 +2215,17 @@ class ResearchCommandService:
     ) -> Decimal | None:
         if value is None:
             return None
+        if (
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+        ):
+            raise ResearchValidationError(
+                {field: ["Must be a finite fixed-precision decimal"]}
+            )
+        return value
+
+    @staticmethod
+    def _required_fixed_decimal(value: object, field: str) -> Decimal:
         if (
             not isinstance(value, Decimal)
             or not value.is_finite()

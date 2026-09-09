@@ -12,4 +12,5 @@ from .governance import GovernanceFlag
 from .disclosure import CompanyDisclosure
 from .market_plan import MarketPlanRevision
 from .forecast import ForecastLine, ForecastRevision
+from .valuation import ValuationReferenceLine, ValuationRevision
 from .utils import *
