@@ -15,6 +15,7 @@ from app.models import (
     Company,
     CompanyDisclosure,
     GovernanceFlag,
+    MarketPlanRevision,
     OwnershipSnapshot,
     ResearchPoint,
     ResearchRevision,
@@ -118,6 +119,19 @@ _DISCLOSURE_WRITABLE_FIELDS = {
     "significance_note",
     "is_key",
     "document_id",
+}
+
+_MARKET_PLAN_REVISION_FIELDS = {
+    "currency",
+    "accumulation_low",
+    "accumulation_high",
+    "preferred_accumulation_price",
+    "supply_low",
+    "supply_high",
+    "invalidation_level",
+    "rationale",
+    "effective_at",
+    "change_reason",
 }
 
 
@@ -312,6 +326,99 @@ class ResearchCommandService:
             db.session.commit()
         except IntegrityError as error:
             is_revision_race = cls._is_revision_number_unique_violation(error)
+            db.session.rollback()
+            if is_revision_race:
+                raise ResearchConflictError(
+                    "revision_conflict",
+                    "Research revision changed",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+        return revision
+
+    @classmethod
+    def create_market_plan_revision(
+        cls, company_id: str, actor_user_id: str, payload: dict
+    ) -> MarketPlanRevision:
+        """Create one immutable market-plan revision atomically."""
+
+        try:
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found", "Company was not found"
+                )
+            if db.session.get(User, actor_user_id) is None:
+                raise ResearchNotFoundError(
+                    "user_not_found", "User was not found"
+                )
+
+            values = cls._build_market_plan_revision_values(payload)
+            supplied_base = payload.get("base_revision_id")
+
+            current = cls._current_market_plan_revision_locked(company_id)
+            if current is None:
+                if supplied_base is not None:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                revision_number = 1
+                supersedes_revision_id = None
+                change_reason = values["change_reason"]
+                if change_reason is not None:
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Cannot be supplied for the first revision"
+                            ]
+                        }
+                    )
+            else:
+                if supplied_base is None:
+                    raise ResearchValidationError(
+                        {
+                            "base_revision_id": [
+                                "The current market plan revision "
+                                "must be supplied"
+                            ]
+                        }
+                    )
+                if supplied_base != current.id:
+                    raise ResearchConflictError(
+                        "revision_conflict",
+                        "Research revision changed",
+                    )
+                change_reason = values["change_reason"]
+                if (
+                    not isinstance(change_reason, str)
+                    or not change_reason.strip()
+                ):
+                    raise ResearchValidationError(
+                        {
+                            "change_reason": [
+                                "Must be a non-empty reason for later "
+                                "revisions"
+                            ]
+                        }
+                    )
+                revision_number = current.revision_number + 1
+                supersedes_revision_id = current.id
+
+            revision = MarketPlanRevision(
+                company_id=company_id,
+                revision_number=revision_number,
+                supersedes_revision_id=supersedes_revision_id,
+                created_by_user_id=actor_user_id,
+                **values,
+            )
+            db.session.add(revision)
+            db.session.commit()
+        except IntegrityError as error:
+            is_revision_race = (
+                cls._is_market_plan_revision_number_unique_violation(error)
+            )
             db.session.rollback()
             if is_revision_race:
                 raise ResearchConflictError(
@@ -636,6 +743,56 @@ class ResearchCommandService:
             .with_for_update()
         )
 
+    @staticmethod
+    def _is_market_plan_revision_number_unique_violation(
+        error: IntegrityError,
+    ) -> bool:
+        """Identify only the unique race for a company's market-plan number."""
+
+        constraint_name = getattr(
+            getattr(error.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name is not None:
+            return (
+                constraint_name
+                == "uq_market_plan_revision_company_number"
+            )
+
+        if db.engine.dialect.name != "sqlite":
+            return False
+        if (
+            getattr(error.orig, "sqlite_errorname", None)
+            != "SQLITE_CONSTRAINT_UNIQUE"
+        ):
+            return False
+
+        prefix = "UNIQUE constraint failed: "
+        message = str(error.orig)
+        if not message.startswith(prefix):
+            return False
+        columns = tuple(
+            column.strip() for column in message[len(prefix) :].split(",")
+        )
+        return columns == (
+            "market_plan_revision.company_id",
+            "market_plan_revision.revision_number",
+        )
+
+    @staticmethod
+    def _current_market_plan_revision_locked(
+        company_id: str,
+    ) -> MarketPlanRevision | None:
+        """Select the current market-plan revision by highest number."""
+
+        return db.session.scalar(
+            sa.select(MarketPlanRevision)
+            .where(MarketPlanRevision.company_id == company_id)
+            .order_by(MarketPlanRevision.revision_number.desc())
+            .with_for_update()
+        )
+
     @classmethod
     def _build_company_values(cls, payload: dict) -> dict:
         cls._reject_unknown_fields(payload)
@@ -801,6 +958,104 @@ class ResearchCommandService:
             }
             points.append(point)
         return points
+
+    @classmethod
+    def _build_market_plan_revision_values(cls, payload: dict) -> dict:
+        unknown = sorted(
+            set(payload)
+            - _MARKET_PLAN_REVISION_FIELDS
+            - {"base_revision_id"}
+        )
+        if unknown:
+            raise ResearchValidationError(
+                {field: ["Unknown field"] for field in unknown}
+            )
+
+        currency = cls._required_text(
+            payload.get("currency", "INR"), "currency"
+        )
+        if currency != "INR":
+            raise ResearchValidationError(
+                {"currency": ["Must be INR in Milestone 1"]}
+            )
+
+        accumulation_low = cls._required_positive_decimal(
+            payload.get("accumulation_low"), "accumulation_low"
+        )
+        accumulation_high = cls._required_positive_decimal(
+            payload.get("accumulation_high"), "accumulation_high"
+        )
+        preferred = cls._optional_positive_decimal(
+            payload.get("preferred_accumulation_price"),
+            "preferred_accumulation_price",
+        )
+        supply_low = cls._optional_positive_decimal(
+            payload.get("supply_low"), "supply_low"
+        )
+        supply_high = cls._optional_positive_decimal(
+            payload.get("supply_high"), "supply_high"
+        )
+        invalidation_level = cls._required_positive_decimal(
+            payload.get("invalidation_level"), "invalidation_level"
+        )
+
+        values = {
+            "currency": currency,
+            "accumulation_low": accumulation_low,
+            "accumulation_high": accumulation_high,
+            "preferred_accumulation_price": preferred,
+            "supply_low": supply_low,
+            "supply_high": supply_high,
+            "invalidation_level": invalidation_level,
+            "rationale": cls._optional_text(
+                payload.get("rationale"), "rationale"
+            ),
+            "effective_at": cls._required_utc_datetime(
+                payload.get("effective_at"), "effective_at"
+            ),
+            "change_reason": cls._optional_text(
+                payload.get("change_reason"), "change_reason"
+            ),
+        }
+        cls._validate_market_plan_bounds(values)
+        return values
+
+    @staticmethod
+    def _validate_market_plan_bounds(values: dict) -> None:
+        details: dict[str, list[str]] = {}
+        accumulation_low = values["accumulation_low"]
+        accumulation_high = values["accumulation_high"]
+        preferred = values["preferred_accumulation_price"]
+        supply_low = values["supply_low"]
+        supply_high = values["supply_high"]
+
+        if accumulation_low > accumulation_high:
+            details["accumulation_low"] = [
+                "Must not exceed accumulation_high"
+            ]
+
+        if (
+            preferred is not None
+            and not (accumulation_low <= preferred <= accumulation_high)
+        ):
+            details["preferred_accumulation_price"] = [
+                "Must lie within the accumulation range"
+            ]
+
+        if (supply_low is None) != (supply_high is None):
+            if supply_low is None:
+                details["supply_low"] = [
+                    "Required when supply_high is present"
+                ]
+            if supply_high is None:
+                details["supply_high"] = [
+                    "Required when supply_low is present"
+                ]
+        elif supply_low is not None and supply_low > supply_high:
+            details["supply_low"] = ["Must not exceed supply_high"]
+
+        if details:
+            raise ResearchValidationError(details)
 
     @classmethod
     def _build_entitlement_values(cls, payload: dict) -> dict:
@@ -1099,6 +1354,28 @@ class ResearchCommandService:
             return None
         validate_percentage(value, field)
         return value
+
+    @staticmethod
+    def _required_positive_decimal(value: object, field: str) -> Decimal:
+        if (
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+            or value <= 0
+        ):
+            raise ResearchValidationError(
+                {field: ["Must be a finite positive decimal"]}
+            )
+        return value
+
+    @staticmethod
+    def _optional_positive_decimal(
+        value: object, field: str
+    ) -> Decimal | None:
+        if value is None:
+            return None
+        return ResearchCommandService._required_positive_decimal(
+            value, field
+        )
 
     @staticmethod
     def _non_negative_int(value: object, field: str) -> int:
