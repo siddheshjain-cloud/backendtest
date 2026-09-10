@@ -13,12 +13,15 @@ lookup. Initial creation intentionally writes no audit event.
 from __future__ import annotations
 
 from marshmallow import ValidationError
+import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.models import (
     Company,
     Document,
+    DocumentAuditEvent,
+    DocumentAuditEventType,
     DocumentCompanyLink,
     Institution,
     InstitutionalReportMetadata,
@@ -222,6 +225,168 @@ class DocumentLibraryService:
 
         return document
 
+    @classmethod
+    def add_company_link(
+        cls,
+        document_id: str,
+        company_id: str,
+        is_primary: bool,
+        actor_user_id: str,
+        reason: str,
+    ) -> Document:
+        """Add one company link and recompute the document fingerprint.
+
+        The complete existing link set is loaded before any mutation, the
+        proposed set is validated without mutating the current rows, and the
+        new link, fingerprint, and focused audit event commit together. A
+        duplicate link, a second primary link, or a duplicate-fingerprint
+        conflict rolls back every change and preserves the prior rights and
+        fingerprint.
+        """
+
+        try:
+            document = db.session.scalar(
+                sa.select(Document)
+                .where(Document.id == document_id)
+                .with_for_update()
+            )
+            if document is None:
+                raise ResearchNotFoundError(
+                    "document_not_found",
+                    "Document was not found",
+                )
+
+            existing_links = db.session.scalars(
+                sa.select(DocumentCompanyLink)
+                .where(DocumentCompanyLink.document_id == document_id)
+                .with_for_update()
+            ).all()
+
+            if any(
+                link.company_id == company_id for link in existing_links
+            ):
+                raise ResearchValidationError(
+                    {
+                        "company_links": [
+                            "Duplicate company links are not allowed"
+                        ]
+                    }
+                )
+
+            if db.session.get(Company, company_id) is None:
+                raise ResearchNotFoundError(
+                    "company_not_found",
+                    "Company was not found",
+                )
+
+            proposed_links = [
+                {
+                    "company_id": link.company_id,
+                    "is_primary": bool(link.is_primary),
+                }
+                for link in existing_links
+            ]
+            proposed_links.append(
+                {
+                    "company_id": company_id,
+                    "is_primary": bool(is_primary),
+                }
+            )
+
+            if sum(
+                1 for link in proposed_links if link["is_primary"]
+            ) > 1:
+                raise ResearchValidationError(
+                    {
+                        "company_links": [
+                            "At most one company link may be primary"
+                        ]
+                    }
+                )
+
+            proposed_company_ids = sorted(
+                {link["company_id"] for link in proposed_links}
+            )
+            institutional_metadata = document.institutional_metadata
+            institution_id = (
+                institutional_metadata.institution_id
+                if institutional_metadata is not None
+                else None
+            )
+            report_type = (
+                institutional_metadata.report_type
+                if institutional_metadata is not None
+                else None
+            )
+
+            proposed_fingerprint = (
+                DocumentDeduplicationService.metadata_fingerprint(
+                    document_type=document.document_type,
+                    company_ids=proposed_company_ids,
+                    document_date=document.document_date,
+                    title=document.title,
+                    publisher_name=document.publisher_name,
+                    institution_id=institution_id,
+                    reporting_period=document.reporting_period,
+                    report_type=report_type,
+                )
+            )
+
+            decision = DocumentDeduplicationService.find_duplicate(
+                metadata_fingerprint=proposed_fingerprint,
+                content_hash_sha256=document.content_hash_sha256,
+            )
+            if decision.kind != "NONE":
+                raise ResearchConflictError(
+                    "document_duplicate",
+                    "Document requires duplicate review",
+                )
+
+            old_snapshot = cls._company_link_snapshot(
+                existing_links,
+                document.metadata_fingerprint,
+            )
+
+            new_link = DocumentCompanyLink(
+                document_id=document_id,
+                company_id=company_id,
+                is_primary=is_primary,
+            )
+            db.session.add(new_link)
+            document.metadata_fingerprint = proposed_fingerprint
+
+            new_snapshot = cls._company_link_snapshot(
+                existing_links + [new_link],
+                proposed_fingerprint,
+            )
+
+            db.session.add(
+                DocumentAuditEvent(
+                    document_id=document_id,
+                    event_type=DocumentAuditEventType.COMPANY_LINKS_CHANGED,
+                    field_changed="company_links",
+                    old_value=old_snapshot,
+                    new_value=new_snapshot,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                )
+            )
+
+            db.session.commit()
+        except IntegrityError as error:
+            db.session.rollback()
+            if cls._is_document_fingerprint_unique_violation(error):
+                raise ResearchConflictError(
+                    "document_duplicate",
+                    "Document requires duplicate review",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+
+        return document
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -333,3 +498,31 @@ class DocumentLibraryService:
             or "UNIQUE constraint failed: document.metadata_fingerprint"
             in message
         )
+
+    @staticmethod
+    def _company_link_snapshot(
+        links: list[DocumentCompanyLink],
+        metadata_fingerprint: str,
+    ) -> dict[str, object]:
+        """Build the audit-only company-link snapshot.
+
+        ``COMPANY_LINKS_CHANGED`` audit rows contain sorted canonical company
+        IDs, the optional primary company ID, and the corresponding metadata
+        fingerprint. No document title, source reference, storage reference,
+        or content is included.
+        """
+
+        company_ids = sorted({link.company_id for link in links})
+        primary_company_id = next(
+            (
+                link.company_id
+                for link in links
+                if link.is_primary
+            ),
+            None,
+        )
+        return {
+            "company_ids": company_ids,
+            "primary_company_id": primary_company_id,
+            "metadata_fingerprint": metadata_fingerprint,
+        }
