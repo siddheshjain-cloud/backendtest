@@ -12,6 +12,8 @@ lookup. Initial creation intentionally writes no audit event.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+
 from marshmallow import ValidationError
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +40,97 @@ from app.utils.research_errors import (
     ResearchConflictError,
     ResearchNotFoundError,
     ResearchValidationError,
+)
+
+
+_PATCHABLE_FIELDS = (
+    "document_type",
+    "title",
+    "document_date",
+    "supersedes_document_id",
+    "original_published_date",
+    "original_published_at",
+    "original_published_at_precision",
+    "reporting_period",
+    "publisher_name",
+    "publisher_reference",
+    "original_source_url",
+    "discovery_source_type",
+    "discovery_source_reference",
+    "source_access",
+    "acquisition_method",
+    "distribution_status",
+    "ingestion_status",
+    "storage_provider",
+    "storage_key",
+    "content_hash_sha256",
+    "mime_type",
+    "file_size_bytes",
+    "provided_by_user_id",
+    "distribution_basis",
+    "rights_verified_by_user_id",
+    "rights_verified_at",
+    "archived_at",
+)
+
+_CANONICAL_FINGERPRINT_FIELDS = frozenset(
+    {
+        "document_type",
+        "title",
+        "document_date",
+        "publisher_name",
+        "reporting_period",
+    }
+)
+
+_STATE_AUDIT_FIELDS = {
+    "source_access": DocumentAuditEventType.SOURCE_ACCESS_CHANGED,
+    "acquisition_method": DocumentAuditEventType.ACQUISITION_METHOD_CHANGED,
+    "distribution_status": DocumentAuditEventType.DISTRIBUTION_STATUS_CHANGED,
+    "ingestion_status": DocumentAuditEventType.INGESTION_STATUS_CHANGED,
+}
+
+_STORAGE_FIELDS = frozenset(
+    {
+        "storage_provider",
+        "storage_key",
+        "content_hash_sha256",
+        "mime_type",
+        "file_size_bytes",
+    }
+)
+
+_RIGHTS_FIELDS = frozenset(
+    {
+        "distribution_basis",
+        "rights_verified_by_user_id",
+        "rights_verified_at",
+    }
+)
+
+_REASON_REQUIRED_FIELDS = frozenset(
+    {
+        "document_type",
+        "title",
+        "document_date",
+        "supersedes_document_id",
+        "original_published_date",
+        "original_published_at",
+        "original_published_at_precision",
+        "reporting_period",
+        "publisher_name",
+        "publisher_reference",
+        "original_source_url",
+        "discovery_source_type",
+        "discovery_source_reference",
+        "source_access",
+        "distribution_status",
+        "provided_by_user_id",
+        "distribution_basis",
+        "rights_verified_by_user_id",
+        "rights_verified_at",
+        "archived_at",
+    }
 )
 
 
@@ -387,6 +480,153 @@ class DocumentLibraryService:
 
         return document
 
+    @classmethod
+    def update_document(
+        cls,
+        document_id: str,
+        changes: dict,
+        actor_user_id: str,
+        reason: str | None,
+    ) -> Document:
+        """Apply one validated, audited metadata/state/rights change.
+
+        The existing Document is locked, the complete resulting state is
+        validated before mutation, and Milestone 1's forbidden
+        ``STORED -> ANALYSED`` transition is rejected. Canonical fingerprint
+        inputs are recomputed and deduplicated before being applied; access,
+        discovery, storage, and rights changes leave the fingerprint alone.
+        Each meaningful change writes a focused append-only audit event in the
+        same transaction, and any exception rolls back every current-state
+        change and audit row.
+        """
+
+        try:
+            document = db.session.scalar(
+                sa.select(Document)
+                .where(Document.id == document_id)
+                .with_for_update()
+            )
+            if document is None:
+                raise ResearchNotFoundError(
+                    "document_not_found",
+                    "Document was not found",
+                )
+
+            normalized = DocumentValidationService.validate_patch(
+                document, changes
+            )
+            DocumentValidationService.validate_transition(
+                document, changes
+            )
+
+            proposed = {
+                field: getattr(document, field)
+                for field in _PATCHABLE_FIELDS
+            }
+            proposed.update(normalized)
+
+            changed_fields = {
+                field
+                for field in normalized
+                if not cls._values_equal(
+                    getattr(document, field),
+                    proposed[field],
+                )
+            }
+
+            if (
+                changed_fields
+                and _REASON_REQUIRED_FIELDS.intersection(changed_fields)
+            ):
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ResearchValidationError(
+                        {
+                            "reason": [
+                                "A non-empty reason is required for document changes"
+                            ]
+                        }
+                    )
+
+            if _CANONICAL_FINGERPRINT_FIELDS.intersection(changed_fields):
+                company_ids = sorted(
+                    {
+                        link.company_id
+                        for link in db.session.scalars(
+                            sa.select(DocumentCompanyLink)
+                            .where(
+                                DocumentCompanyLink.document_id
+                                == document_id
+                            )
+                            .with_for_update()
+                        ).all()
+                    }
+                )
+                institutional_metadata = db.session.get(
+                    InstitutionalReportMetadata, document_id
+                )
+                proposed_fingerprint = (
+                    DocumentDeduplicationService.metadata_fingerprint(
+                        document_type=proposed["document_type"],
+                        company_ids=company_ids,
+                        document_date=proposed["document_date"],
+                        title=proposed["title"],
+                        publisher_name=proposed["publisher_name"],
+                        institution_id=(
+                            institutional_metadata.institution_id
+                            if institutional_metadata is not None
+                            else None
+                        ),
+                        reporting_period=proposed["reporting_period"],
+                        report_type=(
+                            institutional_metadata.report_type
+                            if institutional_metadata is not None
+                            else None
+                        ),
+                    )
+                )
+
+                if proposed_fingerprint != document.metadata_fingerprint:
+                    decision = DocumentDeduplicationService.find_duplicate(
+                        metadata_fingerprint=proposed_fingerprint,
+                        content_hash_sha256=proposed[
+                            "content_hash_sha256"
+                        ],
+                    )
+                    if decision.kind != "NONE":
+                        raise ResearchConflictError(
+                            "document_duplicate",
+                            "Document requires duplicate review",
+                        )
+                    document.metadata_fingerprint = proposed_fingerprint
+
+            audit_events = cls._build_audit_events(
+                document,
+                proposed,
+                changed_fields,
+                actor_user_id,
+                reason,
+            )
+            for event in audit_events:
+                db.session.add(event)
+
+            for field in normalized:
+                setattr(document, field, proposed[field])
+
+            db.session.commit()
+        except IntegrityError as error:
+            db.session.rollback()
+            if cls._is_document_fingerprint_unique_violation(error):
+                raise ResearchConflictError(
+                    "document_duplicate",
+                    "Document requires duplicate review",
+                ) from None
+            raise
+        except Exception:
+            db.session.rollback()
+            raise
+
+        return document
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -526,3 +766,160 @@ class DocumentLibraryService:
             "primary_company_id": primary_company_id,
             "metadata_fingerprint": metadata_fingerprint,
         }
+
+    @classmethod
+    def _build_audit_events(
+        cls,
+        document: Document,
+        proposed: dict[str, object],
+        changed_fields: set[str],
+        actor_user_id: str,
+        reason: str | None,
+    ) -> list[DocumentAuditEvent]:
+        """Build one focused audit row for each meaningful changed field."""
+
+        events: list[DocumentAuditEvent] = []
+
+        for field, event_type in _STATE_AUDIT_FIELDS.items():
+            if field in changed_fields:
+                events.append(
+                    DocumentAuditEvent(
+                        document_id=document.id,
+                        event_type=event_type,
+                        field_changed=field,
+                        old_value=cls._json_safe(
+                            getattr(document, field)
+                        ),
+                        new_value=cls._json_safe(proposed[field]),
+                        actor_user_id=actor_user_id,
+                        reason=reason,
+                    )
+                )
+
+        if _STORAGE_FIELDS.intersection(changed_fields):
+            events.append(
+                DocumentAuditEvent(
+                    document_id=document.id,
+                    event_type=DocumentAuditEventType.STORAGE_ATTACHED,
+                    field_changed="storage_attachment",
+                    old_value=cls._storage_snapshot(document),
+                    new_value=cls._storage_snapshot(proposed),
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                )
+            )
+
+        if _RIGHTS_FIELDS.intersection(changed_fields):
+            old_rights = cls._rights_snapshot(document)
+            new_rights = cls._rights_snapshot(proposed)
+            event_type = (
+                DocumentAuditEventType.RIGHTS_VERIFIED
+                if cls._rights_are_verified(new_rights)
+                else DocumentAuditEventType.RIGHTS_VERIFICATION_REVOKED
+            )
+            events.append(
+                DocumentAuditEvent(
+                    document_id=document.id,
+                    event_type=event_type,
+                    field_changed="rights_verification",
+                    old_value=old_rights,
+                    new_value=new_rights,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                )
+            )
+
+        if "archived_at" in changed_fields:
+            event_type = (
+                DocumentAuditEventType.ARCHIVED
+                if proposed["archived_at"] is not None
+                else DocumentAuditEventType.RESTORED
+            )
+            events.append(
+                DocumentAuditEvent(
+                    document_id=document.id,
+                    event_type=event_type,
+                    field_changed="archived_at",
+                    old_value=cls._json_safe(document.archived_at),
+                    new_value=cls._json_safe(proposed["archived_at"]),
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                )
+            )
+
+        return events
+
+    @staticmethod
+    def _values_equal(left: object, right: object) -> bool:
+        """Compare two values, treating UTC datetimes as timezone-insensitive."""
+
+        if isinstance(left, datetime) and isinstance(right, datetime):
+            left_utc = (
+                left
+                if left.tzinfo is not None
+                else left.replace(tzinfo=timezone.utc)
+            )
+            right_utc = (
+                right
+                if right.tzinfo is not None
+                else right.replace(tzinfo=timezone.utc)
+            )
+            return left_utc.astimezone(timezone.utc).replace(
+                tzinfo=None
+            ) == right_utc.astimezone(timezone.utc).replace(tzinfo=None)
+
+        return left == right
+
+    @staticmethod
+    def _json_safe(value: object) -> object:
+        """Convert temporal values to JSON-safe ISO strings."""
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        return value
+
+    @classmethod
+    def _storage_snapshot(cls, source: object) -> dict[str, object]:
+        """Return a storage audit snapshot without keys, hashes, or content."""
+
+        if isinstance(source, dict):
+            get = source.get
+        else:
+            get = lambda field: getattr(source, field)  # noqa: E731
+
+        return {
+            "storage_provider": get("storage_provider"),
+            "mime_type": get("mime_type"),
+            "file_size_bytes": get("file_size_bytes"),
+            "storage_reference": (
+                "attached" if get("storage_key") else None
+            ),
+            "content_attached": get("content_hash_sha256") is not None,
+        }
+
+    @classmethod
+    def _rights_snapshot(cls, source: object) -> dict[str, object]:
+        """Return the complete rights-verification evidence snapshot."""
+
+        if isinstance(source, dict):
+            get = source.get
+        else:
+            get = lambda field: getattr(source, field)  # noqa: E731
+
+        return {
+            "distribution_basis": get("distribution_basis"),
+            "rights_verified_by_user_id": get(
+                "rights_verified_by_user_id"
+            ),
+            "rights_verified_at": cls._json_safe(
+                get("rights_verified_at")
+            ),
+        }
+
+    @staticmethod
+    def _rights_are_verified(rights: dict[str, object]) -> bool:
+        return all(value is not None for value in rights.values())
