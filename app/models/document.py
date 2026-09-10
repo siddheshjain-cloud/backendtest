@@ -127,6 +127,12 @@ class Document(BaseModel):
     document_date: so.Mapped[date | None] = so.mapped_column(
         sa.Date, nullable=True
     )
+    # Explicit corrected/reissued lineage: a corrected document points at the
+    # earlier document it replaces. The predecessor remains a separate,
+    # immutable historical row. NULL means an ordinary, non-superseding record.
+    supersedes_document_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("document.id"), nullable=True
+    )
     # The original publisher's first-publication time is distinct from SPA
     # record creation and from discovery/acquisition/ingestion. DATE precision
     # never fabricates a midnight timestamp; UNKNOWN makes no claim.
@@ -273,6 +279,10 @@ class Document(BaseModel):
             "metadata_fingerprint",
             name="uq_document_metadata_fingerprint",
         ),
+        sa.CheckConstraint(
+            "supersedes_document_id IS NULL OR id != supersedes_document_id",
+            name="ck_document_not_self_superseding",
+        ),
     )
 
     # Unidirectional relationships; no reverse column or back-reference is
@@ -282,6 +292,18 @@ class Document(BaseModel):
         back_populates="document",
         cascade="all, delete-orphan",
         order_by="DocumentCompanyLink.company_id",
+    )
+    supersedes: so.Mapped["Document | None"] = so.relationship(
+        "Document",
+        remote_side="Document.id",
+        foreign_keys=[supersedes_document_id],
+        viewonly=True,
+        uselist=False,
+    )
+    superseded_by: so.Mapped[list["Document"]] = so.relationship(
+        "Document",
+        foreign_keys=[supersedes_document_id],
+        viewonly=True,
     )
     institutional_metadata: so.Mapped[
         "InstitutionalReportMetadata | None"

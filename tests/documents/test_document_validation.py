@@ -1050,3 +1050,57 @@ def test_validate_patch_rejects_a_timestamp_without_precision():
     )
 
     assert "original_published_at" in details
+
+
+def test_create_schema_preserves_an_explicit_predecessor_reference():
+    loaded = DocumentCreateSchema().load(
+        _payload(
+            _document_fields(supersedes_document_id="earlier-document")
+        )
+    )
+
+    assert (
+        loaded["document"]["supersedes_document_id"] == "earlier-document"
+    )
+
+
+def test_create_schema_defaults_a_missing_predecessor_to_none():
+    loaded = DocumentCreateSchema().load(_payload())
+
+    assert loaded["document"]["supersedes_document_id"] is None
+
+
+def test_create_validation_preserves_the_predecessor_reference():
+    aggregate = DocumentValidationService.validate_create(
+        _payload(
+            _document_fields(supersedes_document_id="earlier-document")
+        )
+    )
+
+    assert (
+        aggregate["document"]["supersedes_document_id"] == "earlier-document"
+    )
+
+
+def test_create_validation_defaults_a_missing_predecessor_to_none():
+    aggregate = DocumentValidationService.validate_create(_payload())
+
+    assert aggregate["document"]["supersedes_document_id"] is None
+
+
+def test_patch_schema_accepts_an_explicit_predecessor_reference():
+    loaded = DocumentPatchSchema().load(
+        {"supersedes_document_id": "earlier-document"}
+    )
+
+    assert loaded["supersedes_document_id"] == "earlier-document"
+
+
+def test_patch_validation_preserves_the_predecessor_reference():
+    document = _document_instance()
+
+    normalized = DocumentValidationService.validate_patch(
+        document, {"supersedes_document_id": "earlier-document"}
+    )
+
+    assert normalized["supersedes_document_id"] == "earlier-document"

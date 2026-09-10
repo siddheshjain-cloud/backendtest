@@ -39,6 +39,7 @@ _DOCUMENT_FIELDS = (
     "document_type",
     "title",
     "document_date",
+    "supersedes_document_id",
     "original_published_date",
     "original_published_at",
     "original_published_at_precision",

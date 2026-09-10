@@ -191,6 +191,7 @@ def test_document_tables_have_exact_columns_and_nullability(app):
         "document_type": False,
         "title": False,
         "document_date": True,
+        "supersedes_document_id": True,
         "original_published_date": True,
         "original_published_at": True,
         "original_published_at_precision": False,
@@ -1064,3 +1065,95 @@ def test_original_publication_precision_is_a_portable_closed_enum(app):
         },
         False,
     )
+
+
+def test_document_exposes_a_nullable_self_supersedes_foreign_key(app):
+    assert _reflected_columns("document")["supersedes_document_id"] is True
+
+    foreign_keys = {
+        frozenset(constraint["constrained_columns"]): constraint[
+            "referred_table"
+        ]
+        for constraint in sa.inspect(db.engine).get_foreign_keys("document")
+    }
+    assert foreign_keys[frozenset({"supersedes_document_id"})] == "document"
+
+    check_names = {
+        constraint["name"]
+        for constraint in sa.inspect(db.engine).get_check_constraints(
+            "document"
+        )
+    }
+    assert "ck_document_not_self_superseding" in check_names
+
+
+def test_ordinary_document_without_a_predecessor_is_valid(
+    app, admin_user, company
+):
+    document = _document(created_by_user_id=admin_user.id)
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert persisted.supersedes_document_id is None
+    assert persisted.supersedes is None
+    assert persisted.superseded_by == []
+
+
+def test_corrected_document_records_its_predecessor(
+    app, admin_user, company
+):
+    original = _document(created_by_user_id=admin_user.id)
+    db.session.add(original)
+    db.session.commit()
+
+    corrected = _document(
+        title="FY26 Annual Report (corrected)",
+        created_by_user_id=admin_user.id,
+        supersedes_document_id=original.id,
+    )
+    db.session.add(corrected)
+    db.session.commit()
+
+    persisted = db.session.get(Document, corrected.id)
+    assert persisted.supersedes_document_id == original.id
+    assert persisted.supersedes is not None
+    assert persisted.supersedes.id == original.id
+    assert persisted.supersedes.title == "FY26 Annual Report"
+    assert [row.id for row in original.superseded_by] == [corrected.id]
+
+
+def test_creating_a_correction_leaves_the_predecessor_unchanged(
+    app, admin_user, company
+):
+    original = _document(created_by_user_id=admin_user.id)
+    db.session.add(original)
+    db.session.commit()
+    original_id = original.id
+    original_title = original.title
+    original_fingerprint = original.metadata_fingerprint
+
+    corrected = _document(
+        title="FY26 Annual Report (corrected)",
+        created_by_user_id=admin_user.id,
+        supersedes_document_id=original_id,
+    )
+    db.session.add(corrected)
+    db.session.commit()
+
+    persisted = db.session.get(Document, original_id)
+    assert persisted.id == original_id
+    assert persisted.title == original_title
+    assert persisted.metadata_fingerprint == original_fingerprint
+    assert persisted.supersedes_document_id is None
+    assert persisted.id != corrected.id
+
+
+def test_document_cannot_supersede_itself(app, admin_user, company):
+    document = _document(
+        created_by_user_id=admin_user.id,
+        id="self-superseding-document",
+        supersedes_document_id="self-superseding-document",
+    )
+    db.session.add(document)
+    _commit_expect_integrity()

@@ -172,6 +172,9 @@ class _DocumentFieldsSchema(Schema):
         required=True, validate=validate.Length(max=300)
     )
     document_date = fields.Date(load_default=None, allow_none=True)
+    supersedes_document_id = _TrimmedStr(
+        load_default=None, allow_none=True, validate=validate.Length(max=64)
+    )
     original_published_date = fields.Date(
         load_default=None, allow_none=True
     )
@@ -323,6 +326,9 @@ class DocumentPatchSchema(Schema):
     )
     title = _RequiredTrimmedStr(validate=validate.Length(max=300))
     document_date = fields.Date(allow_none=True)
+    supersedes_document_id = _TrimmedStr(
+        allow_none=True, validate=validate.Length(max=64)
+    )
     original_published_date = fields.Date(allow_none=True)
     original_published_at = fields.DateTime(allow_none=True)
     original_published_at_precision = fields.String(
