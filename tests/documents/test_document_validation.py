@@ -20,6 +20,7 @@ from app.models.document import (
     Document,
     DocumentType,
     IngestionStatus,
+    OriginalPublicationPrecision,
     SourceAccess,
 )
 from app.schemas.document import (
@@ -861,3 +862,191 @@ def test_institution_create_schema_rejects_unknown_fields():
         )
 
     assert "unexpected" in exc_info.value.messages
+
+
+# ---------------------------------------------------------------------------
+# Original publisher first-publication date/time
+# ---------------------------------------------------------------------------
+
+
+PUBLISHED_AT = "2026-08-06T18:42:17+05:30"
+
+
+def test_create_accepts_an_exact_original_publication_timestamp():
+    document = _document_fields(
+        original_published_at=PUBLISHED_AT,
+        original_published_at_precision=OriginalPublicationPrecision.DATETIME,
+    )
+
+    result = DocumentValidationService.validate_create(_payload(document))
+
+    stored = result["document"]
+    assert (
+        stored["original_published_at_precision"]
+        == OriginalPublicationPrecision.DATETIME
+    )
+    assert isinstance(stored["original_published_at"], datetime)
+    assert stored["original_published_at"].utcoffset() is not None
+    assert stored["original_published_date"] is None
+
+
+def test_create_accepts_a_date_only_original_publication():
+    document = _document_fields(
+        original_published_date="2026-08-06",
+        original_published_at_precision=OriginalPublicationPrecision.DATE,
+    )
+
+    result = DocumentValidationService.validate_create(_payload(document))
+
+    stored = result["document"]
+    assert (
+        stored["original_published_at_precision"]
+        == OriginalPublicationPrecision.DATE
+    )
+    assert stored["original_published_date"] == date(2026, 8, 6)
+    # A date-only publication never fabricates a midnight timestamp.
+    assert stored["original_published_at"] is None
+
+
+def test_create_defaults_original_publication_to_unknown():
+    result = DocumentValidationService.validate_create(_payload())
+
+    stored = result["document"]
+    assert (
+        stored["original_published_at_precision"]
+        == OriginalPublicationPrecision.UNKNOWN
+    )
+    assert stored["original_published_at"] is None
+    assert stored["original_published_date"] is None
+
+
+def test_publication_timestamp_without_explicit_precision_is_rejected():
+    # A publisher timestamp must never be silently reinterpreted as record
+    # creation, discovery, acquisition, or ingestion time.
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(
+            _payload(_document_fields(original_published_at=PUBLISHED_AT))
+        )
+    )
+
+    assert "original_published_at" in details
+
+
+def test_datetime_precision_requires_a_publication_timestamp():
+    document = _document_fields(
+        original_published_at=None,
+        original_published_at_precision=OriginalPublicationPrecision.DATETIME,
+    )
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(_payload(document))
+    )
+
+    assert "original_published_at" in details
+
+
+def test_date_precision_requires_a_publication_date():
+    document = _document_fields(
+        original_published_date=None,
+        original_published_at_precision=OriginalPublicationPrecision.DATE,
+    )
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(_payload(document))
+    )
+
+    assert "original_published_date" in details
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("original_published_at", PUBLISHED_AT),
+        ("original_published_date", "2026-08-06"),
+    ],
+)
+def test_unknown_precision_rejects_any_publication_value(field, value):
+    document = _document_fields(
+        original_published_at=None,
+        original_published_date=None,
+        original_published_at_precision=OriginalPublicationPrecision.UNKNOWN,
+    )
+    document[field] = value
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(_payload(document))
+    )
+
+    assert field in details
+
+
+def test_datetime_precision_rejects_a_separate_date_value():
+    document = _document_fields(
+        original_published_at=PUBLISHED_AT,
+        original_published_date="2026-08-06",
+        original_published_at_precision=OriginalPublicationPrecision.DATETIME,
+    )
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(_payload(document))
+    )
+
+    assert "original_published_date" in details
+
+
+def test_date_precision_rejects_a_publication_timestamp():
+    document = _document_fields(
+        original_published_at=PUBLISHED_AT,
+        original_published_date="2026-08-06",
+        original_published_at_precision=OriginalPublicationPrecision.DATE,
+    )
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(_payload(document))
+    )
+
+    assert "original_published_at" in details
+
+
+def test_original_publication_precision_rejects_an_unknown_value():
+    details = _error_details(
+        lambda: DocumentValidationService.validate_create(
+            _payload(
+                _document_fields(original_published_at_precision="SECONDS")
+            )
+        )
+    )
+
+    assert "original_published_at_precision" in details
+
+
+def test_validate_patch_accepts_datetime_precision_with_timestamp():
+    document = _document_instance()
+
+    normalized = DocumentValidationService.validate_patch(
+        document,
+        {
+            "original_published_at": PUBLISHED_AT,
+            "original_published_at_precision": (
+                OriginalPublicationPrecision.DATETIME
+            ),
+        },
+    )
+
+    assert (
+        normalized["original_published_at_precision"]
+        == OriginalPublicationPrecision.DATETIME
+    )
+
+
+def test_validate_patch_rejects_a_timestamp_without_precision():
+    document = _document_instance()
+
+    details = _error_details(
+        lambda: DocumentValidationService.validate_patch(
+            document,
+            {"original_published_at": PUBLISHED_AT},
+        )
+    )
+
+    assert "original_published_at" in details

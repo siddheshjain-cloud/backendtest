@@ -39,6 +39,7 @@ from app.models.document import (
     DocumentAuditEventType,
     DocumentType,
     IngestionStatus,
+    OriginalPublicationPrecision,
     SourceAccess,
 )
 from app.models.ticker import Ticker
@@ -190,6 +191,9 @@ def test_document_tables_have_exact_columns_and_nullability(app):
         "document_type": False,
         "title": False,
         "document_date": True,
+        "original_published_date": True,
+        "original_published_at": True,
+        "original_published_at_precision": False,
         "reporting_period": True,
         "publisher_name": True,
         "publisher_reference": True,
@@ -935,3 +939,128 @@ def test_legacy_tables_gain_no_document_columns(app):
             f"added={sorted(reflected - expected)} "
             f"removed={sorted(expected - reflected)}"
         )
+
+
+def test_document_represents_an_exact_original_publication_timestamp(
+    app, admin_user, company
+):
+    published_at = datetime(2026, 8, 6, 18, 42, 17, tzinfo=timezone.utc)
+    document = _document(
+        created_by_user_id=admin_user.id,
+        original_published_at=published_at,
+        original_published_at_precision=OriginalPublicationPrecision.DATETIME,
+    )
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert (
+        persisted.original_published_at_precision
+        == OriginalPublicationPrecision.DATETIME
+    )
+    # SQLite persists the wall-clock fields without an offset.
+    assert persisted.original_published_at == published_at.replace(tzinfo=None)
+    assert persisted.original_published_date is None
+
+
+def test_document_records_a_date_only_publication_without_inventing_a_time(
+    app, admin_user, company
+):
+    document = _document(
+        created_by_user_id=admin_user.id,
+        original_published_date=date(2026, 8, 6),
+        original_published_at_precision=OriginalPublicationPrecision.DATE,
+    )
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert (
+        persisted.original_published_at_precision
+        == OriginalPublicationPrecision.DATE
+    )
+    assert persisted.original_published_date == date(2026, 8, 6)
+    # A date-only publication must never fabricate a midnight timestamp.
+    assert persisted.original_published_at is None
+
+
+def test_document_original_publication_defaults_to_unknown(
+    app, admin_user, company
+):
+    document = _document(created_by_user_id=admin_user.id)
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert (
+        persisted.original_published_at_precision
+        == OriginalPublicationPrecision.UNKNOWN
+    )
+    assert persisted.original_published_at is None
+    assert persisted.original_published_date is None
+    # The SPA record still records when it was created, independent of the
+    # (here, unknown) original publication time.
+    assert persisted.created_at is not None
+
+
+def test_document_date_is_not_treated_as_original_publication(
+    app, admin_user, company
+):
+    document = _document(
+        created_by_user_id=admin_user.id,
+        document_date=date(2026, 6, 30),
+    )
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert persisted.document_date == date(2026, 6, 30)
+    # The document's own date never stands in for publisher release time.
+    assert (
+        persisted.original_published_at_precision
+        == OriginalPublicationPrecision.UNKNOWN
+    )
+    assert persisted.original_published_at is None
+    assert persisted.original_published_date is None
+
+
+def test_spa_created_at_is_independent_of_original_publication_time(
+    app, admin_user, company
+):
+    record_created_at = datetime(2026, 9, 9, 8, 0, tzinfo=timezone.utc)
+    published_at = datetime(2026, 8, 6, 18, 42, 17, tzinfo=timezone.utc)
+    document = _document(
+        created_by_user_id=admin_user.id,
+        created_at=record_created_at,
+        original_published_at=published_at,
+        original_published_at_precision=OriginalPublicationPrecision.DATETIME,
+    )
+    db.session.add(document)
+    db.session.commit()
+
+    persisted = db.session.get(Document, document.id)
+    assert persisted.created_at == record_created_at.replace(tzinfo=None)
+    assert persisted.original_published_at == published_at.replace(tzinfo=None)
+    assert persisted.created_at != persisted.original_published_at
+
+
+def test_original_publication_columns_follow_existing_datetime_conventions(app):
+    assert isinstance(
+        _column_type("document", "original_published_date"), sa.Date
+    )
+    assert isinstance(
+        _column_type("document", "original_published_at"), sa.DateTime
+    )
+    # Match the established SPA timezone-aware datetime convention.
+    assert Document.__table__.c.original_published_at.type.timezone is True
+
+
+def test_original_publication_precision_is_a_portable_closed_enum(app):
+    assert _enum_values(Document, "original_published_at_precision") == (
+        {
+            OriginalPublicationPrecision.DATE,
+            OriginalPublicationPrecision.DATETIME,
+            OriginalPublicationPrecision.UNKNOWN,
+        },
+        False,
+    )

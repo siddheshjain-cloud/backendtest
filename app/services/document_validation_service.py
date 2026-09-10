@@ -17,6 +17,7 @@ from app.models.document import (
     Document,
     DocumentType,
     IngestionStatus,
+    OriginalPublicationPrecision,
     SourceAccess,
 )
 from app.schemas.document import DocumentCreateSchema, DocumentPatchSchema
@@ -38,6 +39,9 @@ _DOCUMENT_FIELDS = (
     "document_type",
     "title",
     "document_date",
+    "original_published_date",
+    "original_published_at",
+    "original_published_at_precision",
     "reporting_period",
     "publisher_name",
     "publisher_reference",
@@ -293,6 +297,57 @@ def _is_stored(ingestion_status: object) -> bool:
     )
 
 
+def _validate_original_publication(
+    document: dict, details: dict[str, list[str]]
+) -> None:
+    precision = (
+        document.get("original_published_at_precision")
+        or OriginalPublicationPrecision.UNKNOWN
+    )
+    published_at = document.get("original_published_at")
+    published_date = document.get("original_published_date")
+
+    if precision == OriginalPublicationPrecision.DATETIME:
+        if published_at is None:
+            _add(
+                details,
+                "original_published_at",
+                "Required for DATETIME publication precision",
+            )
+        if published_date is not None:
+            _add(
+                details,
+                "original_published_date",
+                "Not permitted when publication precision is DATETIME",
+            )
+    elif precision == OriginalPublicationPrecision.DATE:
+        if published_date is None:
+            _add(
+                details,
+                "original_published_date",
+                "Required for DATE publication precision",
+            )
+        if published_at is not None:
+            _add(
+                details,
+                "original_published_at",
+                "Not permitted when publication precision is DATE",
+            )
+    else:
+        if published_at is not None:
+            _add(
+                details,
+                "original_published_at",
+                "Not permitted without DATETIME publication precision",
+            )
+        if published_date is not None:
+            _add(
+                details,
+                "original_published_date",
+                "Not permitted without DATE publication precision",
+            )
+
+
 def _validate_document_state(
     document: dict, details: dict[str, list[str]]
 ) -> None:
@@ -301,6 +356,8 @@ def _validate_document_state(
     distribution_status = document.get("distribution_status")
     ingestion_status = document.get("ingestion_status")
     original_source_url = document.get("original_source_url")
+
+    _validate_original_publication(document, details)
 
     if source_access == SourceAccess.PUBLIC and not original_source_url:
         _add(

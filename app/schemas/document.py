@@ -21,6 +21,7 @@ from app.models.document import (
     DistributionStatus,
     DocumentType,
     IngestionStatus,
+    OriginalPublicationPrecision,
     SourceAccess,
 )
 
@@ -171,6 +172,22 @@ class _DocumentFieldsSchema(Schema):
         required=True, validate=validate.Length(max=300)
     )
     document_date = fields.Date(load_default=None, allow_none=True)
+    original_published_date = fields.Date(
+        load_default=None, allow_none=True
+    )
+    original_published_at = fields.DateTime(
+        load_default=None, allow_none=True
+    )
+    original_published_at_precision = fields.String(
+        load_default=OriginalPublicationPrecision.UNKNOWN,
+        validate=validate.OneOf(
+            (
+                OriginalPublicationPrecision.DATE,
+                OriginalPublicationPrecision.DATETIME,
+                OriginalPublicationPrecision.UNKNOWN,
+            )
+        ),
+    )
     reporting_period = _TrimmedStr(
         load_default=None, allow_none=True, validate=validate.Length(max=64)
     )
@@ -306,6 +323,17 @@ class DocumentPatchSchema(Schema):
     )
     title = _RequiredTrimmedStr(validate=validate.Length(max=300))
     document_date = fields.Date(allow_none=True)
+    original_published_date = fields.Date(allow_none=True)
+    original_published_at = fields.DateTime(allow_none=True)
+    original_published_at_precision = fields.String(
+        validate=validate.OneOf(
+            (
+                OriginalPublicationPrecision.DATE,
+                OriginalPublicationPrecision.DATETIME,
+                OriginalPublicationPrecision.UNKNOWN,
+            )
+        )
+    )
     reporting_period = _TrimmedStr(
         allow_none=True, validate=validate.Length(max=64)
     )

@@ -75,6 +75,14 @@ class IngestionStatus:
     ANALYSED = "ANALYSED"
 
 
+class OriginalPublicationPrecision:
+    """How precisely SPA knows the original publisher publication time."""
+
+    DATE = "DATE"
+    DATETIME = "DATETIME"
+    UNKNOWN = "UNKNOWN"
+
+
 class DocumentAuditEventType:
     SOURCE_ACCESS_CHANGED = "SOURCE_ACCESS_CHANGED"
     ACQUISITION_METHOD_CHANGED = "ACQUISITION_METHOD_CHANGED"
@@ -118,6 +126,27 @@ class Document(BaseModel):
     title: so.Mapped[str] = so.mapped_column(sa.String(300), nullable=False)
     document_date: so.Mapped[date | None] = so.mapped_column(
         sa.Date, nullable=True
+    )
+    # The original publisher's first-publication time is distinct from SPA
+    # record creation and from discovery/acquisition/ingestion. DATE precision
+    # never fabricates a midnight timestamp; UNKNOWN makes no claim.
+    original_published_date: so.Mapped[date | None] = so.mapped_column(
+        sa.Date, nullable=True
+    )
+    original_published_at: so.Mapped[datetime | None] = so.mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    original_published_at_precision: so.Mapped[str] = so.mapped_column(
+        enum_type(
+            "document_original_publication_precision",
+            (
+                OriginalPublicationPrecision.DATE,
+                OriginalPublicationPrecision.DATETIME,
+                OriginalPublicationPrecision.UNKNOWN,
+            ),
+        ),
+        nullable=False,
+        default=OriginalPublicationPrecision.UNKNOWN,
     )
     reporting_period: so.Mapped[str | None] = so.mapped_column(
         sa.String(64), nullable=True
