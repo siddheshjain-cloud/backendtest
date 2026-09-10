@@ -33,7 +33,6 @@ from app.models.trade import Trade
 from app.models.user import User
 from app.models.utils import TradeSide, TradeStatus, TradeTimeframe, TradeType
 from app.models.valuation import ValuationReferenceLine, ValuationRevision
-from app.policies.research_access import ResearchAccessPolicy
 from app.services.entitlement_service import EntitlementService
 from config import Config
 
@@ -184,28 +183,38 @@ def research_security_matrix(app):
 
     The fixture seeds a complete premium company record and returns the same
     entitlement scenarios that Plan 3 uses directly and Plan 5 API tests can
-    reuse. Every scenario keeps its resolved access context, access metadata,
-    policy section sets, and a JWT whose tier/admin claims are intentionally
-    stale so the database remains the only tier authority.
+    reuse.
+
+    Every scenario owns literal, independently-defined expectations (expected
+    context tier, admin flag, access tier, projection kind, and locked-section
+    metadata) that are never derived from ``EntitlementService``,
+    ``ResearchAccessPolicy``, or any other production helper under test. Each
+    scenario also keeps the resolved access context, which is the *input*
+    under test, plus a JWT whose tier/admin claims are intentionally stale so
+    the database remains the only tier authority.
+
+    An out-of-enum stored tier is deliberately not a scenario: the
+    ``user_entitlement.tier`` column rejects values outside FREE/PREMIUM at
+    the database/ORM boundary, so such a row cannot even be loaded and no
+    resolver scenario can honestly exist for it.
     """
 
     fixed_now = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
     as_of_date = date(2026, 9, 4)
 
-    free_detail_sections = frozenset(
-        {"company", "business_group", "market_quote", "access"}
-    )
-    premium_detail_sections = free_detail_sections | frozenset(
-        {
-            "research",
-            "management",
-            "governance",
-            "ownership",
-            "market_plan",
-            "forecast",
-            "valuations",
-        }
-    )
+    # Literal free-caller locked-section contract, written out in the
+    # deterministic order the response must use.
+    free_locked_sections = [
+        {"section": "disclosure_significance", "required_tier": "PREMIUM"},
+        {"section": "forecast", "required_tier": "PREMIUM"},
+        {"section": "governance", "required_tier": "PREMIUM"},
+        {"section": "history", "required_tier": "PREMIUM"},
+        {"section": "management", "required_tier": "PREMIUM"},
+        {"section": "market_plan", "required_tier": "PREMIUM"},
+        {"section": "ownership", "required_tier": "PREMIUM"},
+        {"section": "research", "required_tier": "PREMIUM"},
+        {"section": "valuation", "required_tier": "PREMIUM"},
+    ]
 
     def _make_user(email: str, *, is_admin: bool = False) -> User:
         user = User(name=email.split("@")[0], email=email, is_admin=is_admin)
@@ -308,7 +317,7 @@ def research_security_matrix(app):
             research_revision_id=research.id,
             kind=ResearchPointKind.RISK,
             title="SENTINEL-RESEARCH-RISK-TITLE",
-            detail=None,
+            detail="SENTINEL-RESEARCH-RISK-DETAIL",
             status=None,
             target_date=None,
             sort_order=0,
@@ -451,6 +460,11 @@ def research_security_matrix(app):
     scenario_specs = [
         {
             "id": "missing",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": None,
             "token_tier": ResearchTier.PREMIUM,
@@ -458,6 +472,11 @@ def research_security_matrix(app):
         },
         {
             "id": "inactive",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.PREMIUM,
@@ -468,6 +487,11 @@ def research_security_matrix(app):
         },
         {
             "id": "revoked",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.PREMIUM,
@@ -478,6 +502,11 @@ def research_security_matrix(app):
         },
         {
             "id": "future",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.PREMIUM,
@@ -491,6 +520,11 @@ def research_security_matrix(app):
         },
         {
             "id": "expired",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.PREMIUM,
@@ -504,6 +538,11 @@ def research_security_matrix(app):
         },
         {
             "id": "active_free",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": False,
+            "expected_access_tier": "FREE",
+            "expected_projection": "free",
+            "expected_locked_sections": free_locked_sections,
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.FREE,
@@ -514,6 +553,11 @@ def research_security_matrix(app):
         },
         {
             "id": "active_premium",
+            "expected_context_tier": "PREMIUM",
+            "expected_is_admin": False,
+            "expected_access_tier": "PREMIUM",
+            "expected_projection": "premium",
+            "expected_locked_sections": [],
             "is_admin": False,
             "entitlement": {
                 "tier": ResearchTier.PREMIUM,
@@ -524,6 +568,11 @@ def research_security_matrix(app):
         },
         {
             "id": "admin_without_row",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": True,
+            "expected_access_tier": "ADMIN",
+            "expected_projection": "admin",
+            "expected_locked_sections": [],
             "is_admin": True,
             "entitlement": None,
             "token_tier": ResearchTier.FREE,
@@ -531,6 +580,11 @@ def research_security_matrix(app):
         },
         {
             "id": "admin_with_stale_tier_claim",
+            "expected_context_tier": "FREE",
+            "expected_is_admin": True,
+            "expected_access_tier": "ADMIN",
+            "expected_projection": "admin",
+            "expected_locked_sections": [],
             "is_admin": True,
             "entitlement": None,
             "token_tier": ResearchTier.PREMIUM,
@@ -562,7 +616,9 @@ def research_security_matrix(app):
         "SENTINEL-RESEARCH-WHAT-IS-CHANGING",
         "SENTINEL-RESEARCH-BUSINESS-JOURNEY",
         "SENTINEL-RESEARCH-CATALYST-TITLE",
+        "SENTINEL-RESEARCH-CATALYST-DETAIL",
         "SENTINEL-RESEARCH-RISK-TITLE",
+        "SENTINEL-RESEARCH-RISK-DETAIL",
         "SENTINEL-RESEARCH-INVALIDATION",
         "SENTINEL-MANAGEMENT-SUMMARY",
         "SENTINEL-MANAGEMENT-RATIONALE",
@@ -585,33 +641,26 @@ def research_security_matrix(app):
     scenarios: dict[str, dict[str, object]] = {}
     for spec in scenario_specs:
         user = users_by_scenario[spec["id"]]
-        context = EntitlementService.resolve(user, at=fixed_now)
-        access_tier = "ADMIN" if context.is_admin else context.tier
-        token = create_access_token(
-            identity=user.id,
-            additional_claims={
-                "tier": spec["token_tier"],
-                "is_admin": spec["token_is_admin"],
-            },
-        )
         scenarios[spec["id"]] = {
             "id": spec["id"],
             "user": user,
-            "context": context,
-            "access_tier": access_tier,
-            "allowed_sections": ResearchAccessPolicy.allowed_sections(
-                context
+            # Input under test, never an oracle.
+            "context": EntitlementService.resolve(user, at=fixed_now),
+            # Literal expectations owned by the tests.
+            "expected_context_tier": spec["expected_context_tier"],
+            "expected_is_admin": spec["expected_is_admin"],
+            "expected_access_tier": spec["expected_access_tier"],
+            "expected_projection": spec["expected_projection"],
+            "expected_locked_sections": [
+                dict(item) for item in spec["expected_locked_sections"]
+            ],
+            "jwt": create_access_token(
+                identity=user.id,
+                additional_claims={
+                    "tier": spec["token_tier"],
+                    "is_admin": spec["token_is_admin"],
+                },
             ),
-            "locked_sections": ResearchAccessPolicy.locked_sections(
-                context
-            ),
-            "detail_sections": (
-                premium_detail_sections
-                if context.is_admin
-                or context.tier == ResearchTier.PREMIUM
-                else free_detail_sections
-            ),
-            "jwt": token,
         }
 
     return {
@@ -620,8 +669,9 @@ def research_security_matrix(app):
         "company": company,
         "ticker": ticker,
         "actor_user_id": actor.id,
-        "free_detail_sections": free_detail_sections,
-        "premium_detail_sections": premium_detail_sections,
+        "free_locked_sections": [
+            dict(item) for item in free_locked_sections
+        ],
         "premium_markers": premium_markers,
         "research_thesis_marker": research_thesis_marker,
         "disclosure_significance_marker": disclosure_significance_marker,
