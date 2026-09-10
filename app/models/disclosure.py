@@ -3,8 +3,8 @@
 A disclosure represents the event; an attached filing is represented once in
 the common Document Library. ``is_key`` is a manual designation only, and
 Milestone 1 has no numeric importance field or automated classification.
-``document_id`` remains a nullable pre-Document string placeholder in this
-plan until the document table enters metadata.
+``document_id`` is a nullable foreign key to the common Document Library and
+is populated only once document metadata exists.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class CompanyDisclosure(BaseModel):
         server_default=sa.false(),
     )
     document_id: so.Mapped[str | None] = so.mapped_column(
-        sa.String(36), nullable=True
+        sa.ForeignKey("document.id"), nullable=True
     )
     created_by_user_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("user.id"), nullable=False

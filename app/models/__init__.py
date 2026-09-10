@@ -10,6 +10,20 @@ from .research import ResearchPoint, ResearchRevision
 from .ownership import OwnershipSnapshot
 from .governance import GovernanceFlag
 from .disclosure import CompanyDisclosure
+from .document import (
+    AcquisitionMethod,
+    DiscoverySourceType,
+    DistributionStatus,
+    Document,
+    DocumentAuditEvent,
+    DocumentAuditEventType,
+    DocumentCompanyLink,
+    DocumentType,
+    IngestionStatus,
+    SourceAccess,
+)
+from .institution import Institution
+from .institutional_report import InstitutionalReportMetadata
 from .market_plan import MarketPlanRevision
 from .forecast import ForecastLine, ForecastRevision
 from .valuation import ValuationReferenceLine, ValuationRevision
