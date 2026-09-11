@@ -6,11 +6,14 @@ the complete resulting state, reject Milestone 1's forbidden
 ``STORED -> ANALYSED`` transition, recompute and deduplicate only when a
 canonical fingerprint input changes, and write focused append-only
 ``DocumentAuditEvent`` rows in the same transaction as the applied changes.
-Audit rows must never contain storage keys, file hashes, or file content.
+Audit rows must never contain raw storage keys or file content. Material
+storage identity is recorded as a content hash and a deterministic storage-key
+digest so binary replacements remain traceable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -493,7 +496,7 @@ def test_rights_verification_revocation_writes_revoked_event(
     }
 
 
-def test_storage_attachment_metadata_is_audited_without_secrets(
+def test_storage_attachment_metadata_is_audited_without_raw_keys(
     app, admin_user, company
 ):
     document = _create_document(
@@ -527,23 +530,26 @@ def test_storage_attachment_metadata_is_audited_without_secrets(
     assert event.field_changed == "storage_attachment"
     for audit_value in (event.old_value, event.new_value):
         serialized = json.dumps(audit_value, sort_keys=True)
-        assert "storage_key" not in serialized
-        assert STORED_SHA256 not in serialized
+        assert '"storage_key":' not in serialized
         assert "opaque/object/key" not in serialized
 
     assert event.old_value == {
         "storage_provider": "object-store",
+        "storage_key_sha256": hashlib.sha256(
+            b"opaque/object/key"
+        ).hexdigest(),
+        "content_hash_sha256": STORED_SHA256,
         "mime_type": "application/pdf",
         "file_size_bytes": 1024,
-        "storage_reference": "attached",
-        "content_attached": True,
     }
     assert event.new_value == {
         "storage_provider": "object-store",
+        "storage_key_sha256": hashlib.sha256(
+            b"opaque/object/key"
+        ).hexdigest(),
+        "content_hash_sha256": STORED_SHA256,
         "mime_type": "application/octet-stream",
         "file_size_bytes": 2048,
-        "storage_reference": "attached",
-        "content_attached": True,
     }
 
 
@@ -1068,3 +1074,179 @@ def test_audit_rows_accumulate_without_mutating_prior_rows(
         row.event_type == DocumentAuditEventType.SOURCE_ACCESS_CHANGED
         for row in rows
     )
+
+
+def test_storage_transition_with_already_set_hash_runs_duplicate_protection(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        document=_stored_document_fields(
+            provided_by_user_id=admin_user.id,
+            title="Stored original",
+        ),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    fingerprint = DocumentDeduplicationService.metadata_fingerprint(
+        document_type=DocumentType.ANNUAL_REPORT,
+        company_ids=[],
+        document_date=None,
+        title="Awaiting replacement",
+        publisher_name=None,
+        institution_id=None,
+        reporting_period=None,
+        report_type=None,
+    )
+    awaiting = Document(
+        document_type=DocumentType.ANNUAL_REPORT,
+        title="Awaiting replacement",
+        document_date=None,
+        discovery_source_type=DiscoverySourceType.OFFICIAL_SITE,
+        source_access=SourceAccess.RESTRICTED,
+        acquisition_method=AcquisitionMethod.MANUAL_REFERENCE,
+        distribution_status=DistributionStatus.UNKNOWN,
+        ingestion_status=IngestionStatus.DISCOVERED,
+        content_hash_sha256=STORED_SHA256,
+        metadata_fingerprint=fingerprint,
+        created_by_user_id=admin_user.id,
+    )
+    db.session.add(awaiting)
+    db.session.commit()
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.update_document(
+            document_id=awaiting.id,
+            changes={
+                "ingestion_status": IngestionStatus.STORED,
+                "acquisition_method": AcquisitionMethod.USER_UPLOAD,
+                "source_access": SourceAccess.RESTRICTED,
+                "distribution_status": DistributionStatus.PRIVATE_LIBRARY,
+                "original_source_url": None,
+                "provided_by_user_id": admin_user.id,
+                "storage_provider": "object-store",
+                "storage_key": "opaque/object/key/replacement",
+                "content_hash_sha256": STORED_SHA256,
+                "mime_type": "application/pdf",
+                "file_size_bytes": 1024,
+            },
+            actor_user_id=admin_user.id,
+            reason="Attach the uploaded binary",
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    persisted = db.session.get(Document, awaiting.id)
+    assert persisted.ingestion_status == IngestionStatus.DISCOVERED
+    assert persisted.content_hash_sha256 == STORED_SHA256
+    assert _audit_count(awaiting.id) == 0
+
+
+def test_intermediate_same_fingerprint_lineage_remains_editable(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    reissued = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=corrected.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    original_fingerprint = original.metadata_fingerprint
+    corrected_fingerprint = corrected.metadata_fingerprint
+
+    updated = DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={"title": "Corrected FY26 Annual Report"},
+        actor_user_id=admin_user.id,
+        reason="Correct the intermediate title",
+    )
+
+    persisted_corrected = db.session.get(Document, corrected.id)
+    persisted_reissued = db.session.get(Document, reissued.id)
+    assert updated.title == "Corrected FY26 Annual Report"
+    assert persisted_corrected.metadata_fingerprint != corrected_fingerprint
+    assert persisted_corrected.is_fingerprint_duplicate is False
+    assert persisted_reissued.supersedes_document_id == corrected.id
+    assert persisted_reissued.metadata_fingerprint == original_fingerprint
+    assert persisted_reissued.is_fingerprint_duplicate is True
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            document=_document_fields(),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+
+
+def test_intermediate_lineage_storage_attachment_is_not_an_ordinary_duplicate(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    reissued = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=corrected.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    lineage_fingerprint = original.metadata_fingerprint
+    replacement_hash = "b" * 64
+
+    updated = DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={
+            "ingestion_status": IngestionStatus.STORED,
+            "acquisition_method": AcquisitionMethod.USER_UPLOAD,
+            "source_access": SourceAccess.RESTRICTED,
+            "distribution_status": DistributionStatus.PRIVATE_LIBRARY,
+            "original_source_url": None,
+            "provided_by_user_id": admin_user.id,
+            "storage_provider": "object-store",
+            "storage_key": "opaque/object/key/corrected",
+            "content_hash_sha256": replacement_hash,
+            "mime_type": "application/pdf",
+            "file_size_bytes": 2048,
+        },
+        actor_user_id=admin_user.id,
+        reason="Attach corrected binary",
+    )
+
+    persisted_corrected = db.session.get(Document, corrected.id)
+    persisted_reissued = db.session.get(Document, reissued.id)
+    assert updated.content_hash_sha256 == replacement_hash
+    assert persisted_corrected.ingestion_status == IngestionStatus.STORED
+    assert persisted_corrected.metadata_fingerprint == lineage_fingerprint
+    assert persisted_corrected.is_fingerprint_duplicate is True
+    assert persisted_reissued.supersedes_document_id == corrected.id
+    assert persisted_reissued.metadata_fingerprint == lineage_fingerprint
+    assert persisted_reissued.is_fingerprint_duplicate is True
+
+    unrelated_stored_fields = _stored_document_fields()
+    unrelated_stored_fields["content_hash_sha256"] = replacement_hash
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            document=unrelated_stored_fields,
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"

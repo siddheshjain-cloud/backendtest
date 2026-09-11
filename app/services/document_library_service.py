@@ -12,6 +12,7 @@ lookup. Initial creation intentionally writes no audit event.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timezone
 
 from marshmallow import ValidationError
@@ -28,6 +29,7 @@ from app.models import (
     DocumentAuditEventType,
     DocumentCompanyLink,
     DocumentType,
+    IngestionStatus,
     Institution,
     InstitutionalReportMetadata,
     SourceAccess,
@@ -108,6 +110,10 @@ _STORAGE_FIELDS = frozenset(
         "mime_type",
         "file_size_bytes",
     }
+)
+
+_STORED_INGESTION_STATUSES = frozenset(
+    {IngestionStatus.STORED, IngestionStatus.ANALYSED}
 )
 
 _RIGHTS_FIELDS = frozenset(
@@ -605,6 +611,7 @@ class DocumentLibraryService:
             decision = DocumentDeduplicationService.find_duplicate(
                 metadata_fingerprint=proposed_fingerprint,
                 content_hash_sha256=document.content_hash_sha256,
+                exclude_document_id=document.id,
             )
             if decision.kind != "NONE":
                 raise ResearchConflictError(
@@ -618,10 +625,11 @@ class DocumentLibraryService:
             )
 
             successor = cls._direct_successor_using_fingerprint_slot(document)
+            was_fingerprint_duplicate = document.is_fingerprint_duplicate
             document.metadata_fingerprint = proposed_fingerprint
             document.is_fingerprint_duplicate = False
             db.session.flush([document])
-            if successor is not None:
+            if successor is not None and not was_fingerprint_duplicate:
                 successor.is_fingerprint_duplicate = False
 
             new_link = DocumentCompanyLink(
@@ -744,6 +752,9 @@ class DocumentLibraryService:
                         }
                     )
 
+            fingerprint_for_duplicate = document.metadata_fingerprint
+            dedup_checked = False
+
             if _CANONICAL_FINGERPRINT_FIELDS.intersection(changed_fields):
                 company_ids = sorted(
                     {
@@ -781,6 +792,7 @@ class DocumentLibraryService:
                         ),
                     )
                 )
+                fingerprint_for_duplicate = proposed_fingerprint
 
                 if proposed_fingerprint != document.metadata_fingerprint:
                     decision = DocumentDeduplicationService.find_duplicate(
@@ -788,7 +800,9 @@ class DocumentLibraryService:
                         content_hash_sha256=proposed[
                             "content_hash_sha256"
                         ],
+                        exclude_document_id=document.id,
                     )
+                    dedup_checked = True
                     if decision.kind != "NONE":
                         raise ResearchConflictError(
                             "document_duplicate",
@@ -799,11 +813,63 @@ class DocumentLibraryService:
                             document
                         )
                     )
+                    was_fingerprint_duplicate = (
+                        document.is_fingerprint_duplicate
+                    )
                     document.metadata_fingerprint = proposed_fingerprint
                     document.is_fingerprint_duplicate = False
                     db.session.flush([document])
-                    if successor is not None:
+                    if (
+                        successor is not None
+                        and not was_fingerprint_duplicate
+                    ):
                         successor.is_fingerprint_duplicate = False
+
+            was_stored = (
+                document.ingestion_status
+                in _STORED_INGESTION_STATUSES
+            )
+            will_be_stored = (
+                proposed["ingestion_status"]
+                in _STORED_INGESTION_STATUSES
+            )
+            content_hash_changed = (
+                proposed["content_hash_sha256"]
+                != document.content_hash_sha256
+            )
+            binary_identity_established = (
+                not was_stored
+                and will_be_stored
+                and proposed["content_hash_sha256"] is not None
+            )
+            if (
+                not dedup_checked
+                and (
+                    content_hash_changed
+                    or binary_identity_established
+                )
+            ):
+                lineage_metadata_matches = (
+                    cls._same_fingerprint_lineage_document_ids(
+                        document,
+                        fingerprint_for_duplicate,
+                    )
+                )
+                decision = DocumentDeduplicationService.find_duplicate(
+                    metadata_fingerprint=fingerprint_for_duplicate,
+                    content_hash_sha256=proposed[
+                        "content_hash_sha256"
+                    ],
+                    exclude_document_id=document.id,
+                    ignored_metadata_match_document_ids=(
+                        lineage_metadata_matches
+                    ),
+                )
+                if decision.kind != "NONE":
+                    raise ResearchConflictError(
+                        "document_duplicate",
+                        "Document requires duplicate review",
+                    )
 
             audit_events = cls._build_audit_events(
                 document,
@@ -1437,6 +1503,55 @@ class DocumentLibraryService:
             .with_for_update()
         )
 
+    @classmethod
+    def _same_fingerprint_lineage_document_ids(
+        cls,
+        document: Document,
+        metadata_fingerprint: str,
+    ) -> set[str]:
+        """Return lineage relatives sharing the supplied fingerprint.
+
+        Corrected/reissued chains may contain multiple rows with the same
+        canonical fingerprint. When a node in such a chain receives a
+        non-canonical binary/storage update, those relatives are valid
+        lineage records rather than ordinary duplicates.
+        """
+
+        related_ids: set[str] = set()
+
+        ancestor_id = document.supersedes_document_id
+        visited_ancestor_ids: set[str] = set()
+        while ancestor_id is not None and ancestor_id not in visited_ancestor_ids:
+            visited_ancestor_ids.add(ancestor_id)
+            ancestor = db.session.get(Document, ancestor_id)
+            if ancestor is None:
+                break
+            if ancestor.metadata_fingerprint == metadata_fingerprint:
+                related_ids.add(ancestor.id)
+            ancestor_id = ancestor.supersedes_document_id
+
+        pending_ids = [document.id]
+        visited_descendant_ids = {document.id}
+        while pending_ids:
+            parent_id = pending_ids.pop()
+            child_ids = db.session.scalars(
+                sa.select(Document.id)
+                .where(Document.supersedes_document_id == parent_id)
+                .with_for_update()
+            ).all()
+            for child_id in child_ids:
+                if child_id in visited_descendant_ids:
+                    continue
+                visited_descendant_ids.add(child_id)
+                child = db.session.get(Document, child_id)
+                if child is None:
+                    continue
+                if child.metadata_fingerprint == metadata_fingerprint:
+                    related_ids.add(child.id)
+                pending_ids.append(child.id)
+
+        return related_ids
+
     @staticmethod
     def _values_equal(left: object, right: object) -> bool:
         """Compare two values, treating UTC datetimes as timezone-insensitive."""
@@ -1472,22 +1587,34 @@ class DocumentLibraryService:
 
     @classmethod
     def _storage_snapshot(cls, source: object) -> dict[str, object]:
-        """Return a storage audit snapshot without keys, hashes, or content."""
+        """Return an auditable storage/binary identity snapshot.
+
+        The raw storage key is never included. Its deterministic digest and
+        the content hash are included so a storage replacement can be traced
+        without exposing the opaque object reference.
+        """
 
         if isinstance(source, dict):
             get = source.get
         else:
             get = lambda field: getattr(source, field)  # noqa: E731
 
+        storage_key = get("storage_key")
         return {
             "storage_provider": get("storage_provider"),
+            "storage_key_sha256": cls._sha256_digest(storage_key),
+            "content_hash_sha256": get("content_hash_sha256"),
             "mime_type": get("mime_type"),
             "file_size_bytes": get("file_size_bytes"),
-            "storage_reference": (
-                "attached" if get("storage_key") else None
-            ),
-            "content_attached": get("content_hash_sha256") is not None,
         }
+
+    @staticmethod
+    def _sha256_digest(value: object) -> str | None:
+        """Return a stable SHA-256 digest for an opaque audit value."""
+
+        if value is None:
+            return None
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
     @classmethod
     def _rights_snapshot(cls, source: object) -> dict[str, object]:

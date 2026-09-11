@@ -139,14 +139,29 @@ class DocumentDeduplicationService:
         *,
         metadata_fingerprint: str,
         content_hash_sha256: str | None,
+        exclude_document_id: str | None = None,
+        ignored_metadata_match_document_ids: set[str] | None = None,
     ) -> DuplicateDecision:
-        """Classify a candidate using binary evidence before metadata."""
+        """Classify a candidate using binary evidence before metadata.
+
+        ``exclude_document_id`` removes the row being updated from both
+        content and metadata lookups. ``ignored_metadata_match_document_ids``
+        removes only valid same-fingerprint lineage relatives from the
+        metadata lookup, so a lineage node can be maintained without being
+        mistaken for an unrelated ordinary duplicate. Binary matches remain
+        authoritative even for those relatives.
+        """
+
+        identity_filters: list[object] = []
+        if exclude_document_id is not None:
+            identity_filters.append(Document.id != exclude_document_id)
 
         if content_hash_sha256:
             content_match = db.session.scalar(
                 sa.select(Document)
                 .where(
-                    Document.content_hash_sha256 == content_hash_sha256
+                    Document.content_hash_sha256 == content_hash_sha256,
+                    *identity_filters,
                 )
                 .order_by(Document.created_at, Document.id)
                 .limit(1)
@@ -165,9 +180,20 @@ class DocumentDeduplicationService:
                     matched_document_id=content_match.id,
                 )
 
+        metadata_filters = [
+            Document.metadata_fingerprint == metadata_fingerprint,
+            *identity_filters,
+        ]
+        if ignored_metadata_match_document_ids:
+            metadata_filters.append(
+                Document.id.not_in(
+                    ignored_metadata_match_document_ids
+                )
+            )
+
         metadata_match = db.session.scalar(
             sa.select(Document)
-            .where(Document.metadata_fingerprint == metadata_fingerprint)
+            .where(*metadata_filters)
             .limit(1)
         )
         if metadata_match is not None:
