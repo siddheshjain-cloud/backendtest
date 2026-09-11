@@ -17,16 +17,24 @@ from datetime import date, datetime, timezone
 from marshmallow import ValidationError
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from app import db
 from app.models import (
     Company,
+    DistributionStatus,
     Document,
     DocumentAuditEvent,
     DocumentAuditEventType,
     DocumentCompanyLink,
+    DocumentType,
     Institution,
     InstitutionalReportMetadata,
+    SourceAccess,
+)
+from app.policies.document_access import (
+    DocumentAccessDecision,
+    DocumentAccessPolicy,
 )
 from app.schemas.document import InstitutionCreateSchema
 from app.services.document_deduplication_service import (
@@ -36,6 +44,8 @@ from app.services.document_deduplication_service import (
 from app.services.document_validation_service import (
     DocumentValidationService,
 )
+from app.services.entitlement_service import ResearchAccessContext
+from app.services.research_query_service import PageResult
 from app.utils.research_errors import (
     ResearchConflictError,
     ResearchNotFoundError,
@@ -132,6 +142,147 @@ _REASON_REQUIRED_FIELDS = frozenset(
         "archived_at",
     }
 )
+
+
+def _validate_document_page_bounds(page: int, per_page: int) -> None:
+    """Validate the shared collection page contract."""
+
+    details: dict[str, list[str]] = {}
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        details["page"] = ["Must be a positive integer"]
+    if (
+        not isinstance(per_page, int)
+        or isinstance(per_page, bool)
+        or per_page < 1
+        or per_page > 100
+    ):
+        details["per_page"] = ["Must be an integer between 1 and 100"]
+    if details:
+        raise ResearchValidationError(details)
+
+
+def _validate_document_filters(filters: dict | None) -> dict[str, object]:
+    """Validate and normalize the frozen document collection filters."""
+
+    if filters is None:
+        return {}
+    if not isinstance(filters, dict):
+        raise ResearchValidationError(
+            {"filters": ["Must be an object"]}
+        )
+
+    values: dict[str, object] = {}
+    document_type = filters.get("document_type")
+    institution_id = filters.get("institution_id")
+    report_type = filters.get("report_type")
+    date_from = filters.get("date_from")
+    date_to = filters.get("date_to")
+    details: dict[str, list[str]] = {}
+
+    if document_type is not None:
+        if (
+            not isinstance(document_type, str)
+            or document_type
+            not in {
+                DocumentType.ANNUAL_REPORT,
+                DocumentType.QUARTERLY_RESULTS,
+                DocumentType.INVESTOR_PRESENTATION,
+                DocumentType.CONCALL,
+                DocumentType.SCREENER,
+                DocumentType.REG30_ATTACHMENT,
+                DocumentType.CREDIT_RATING_REPORT,
+                DocumentType.INDUSTRY_REPORT,
+                DocumentType.INSTITUTIONAL_RESEARCH,
+                DocumentType.OTHER,
+            }
+        ):
+            details["document_type"] = [
+                "Must be a supported document type"
+            ]
+        else:
+            values["document_type"] = document_type
+
+    if institution_id is not None:
+        if (
+            not isinstance(institution_id, str)
+            or not institution_id.strip()
+        ):
+            details["institution_id"] = ["Must be a non-empty string"]
+        else:
+            values["institution_id"] = institution_id
+
+    if report_type is not None:
+        if not isinstance(report_type, str) or not report_type.strip():
+            details["report_type"] = ["Must be a non-empty string"]
+        else:
+            values["report_type"] = report_type
+
+    if date_from is not None and not isinstance(date_from, date):
+        details["date_from"] = ["Must be an ISO date"]
+    if date_to is not None and not isinstance(date_to, date):
+        details["date_to"] = ["Must be an ISO date"]
+    if (
+        isinstance(date_from, date)
+        and isinstance(date_to, date)
+        and date_from > date_to
+    ):
+        details["date_from"] = [
+            "date_from must be on or before date_to"
+        ]
+    if details:
+        raise ResearchValidationError(details)
+
+    if date_from is not None:
+        values["date_from"] = date_from
+    if date_to is not None:
+        values["date_to"] = date_to
+    return values
+
+
+def _company_exists(company_id: str) -> bool:
+    return (
+        db.session.scalar(
+            sa.select(sa.func.count())
+            .select_from(Company)
+            .where(Company.id == company_id)
+        )
+        > 0
+    )
+
+
+def _document_order_by() -> tuple[object, ...]:
+    """Deterministic newest-first ordering with date and identity ties."""
+
+    return (
+        sa.nullslast(sa.desc(Document.document_date)),
+        sa.desc(Document.created_at),
+        sa.desc(Document.id),
+    )
+
+
+def _document_visibility_predicate(
+    context: ResearchAccessContext,
+) -> object:
+    """Return the SQL-expressible part of the document-rights decision."""
+
+    if context.is_admin:
+        return Document.archived_at.is_(None)
+
+    return sa.and_(
+        Document.archived_at.is_(None),
+        sa.or_(
+            sa.and_(
+                Document.source_access == SourceAccess.PUBLIC,
+                Document.distribution_status.in_(
+                    (
+                        DistributionStatus.LINK_ONLY,
+                        DistributionStatus.APP_DISTRIBUTABLE,
+                    )
+                ),
+            ),
+            Document.provided_by_user_id == context.user_id,
+        ),
+    )
 
 
 class DocumentLibraryService:
@@ -628,8 +779,318 @@ class DocumentLibraryService:
         return document
 
     # ------------------------------------------------------------------
+    # Rights-safe queries
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_document(
+        cls,
+        document_id: str,
+        context: ResearchAccessContext,
+    ) -> dict[str, object]:
+        """Return one explicit policy projection or a non-revealing miss."""
+
+        document = db.session.scalar(
+            sa.select(Document)
+            .where(Document.id == document_id)
+            .options(
+                selectinload(Document.institutional_metadata).selectinload(
+                    InstitutionalReportMetadata.institution
+                )
+            )
+        )
+        if document is None:
+            raise cls._document_not_found()
+
+        decision = DocumentAccessPolicy.evaluate(document, context)
+        if not decision.visible:
+            raise cls._document_not_found()
+
+        return cls._document_query_payload(document, decision)
+
+    @classmethod
+    def list_company_documents(
+        cls,
+        company_id: str,
+        filters: dict,
+        page: int,
+        per_page: int,
+        context: ResearchAccessContext,
+    ) -> PageResult:
+        """Return a rights-filtered, paginated document page."""
+
+        _validate_document_page_bounds(page, per_page)
+        filter_values = _validate_document_filters(filters)
+        if not _company_exists(company_id):
+            raise ResearchNotFoundError(
+                "company_not_found", "Company was not found"
+            )
+
+        statement = cls._company_documents_statement(
+            company_id,
+            filter_values,
+            context,
+        )
+        total_items = (
+            db.session.scalar(
+                sa.select(sa.func.count()).select_from(
+                    statement.subquery()
+                )
+            )
+            or 0
+        )
+        rows = db.session.scalars(
+            statement.options(
+                selectinload(Document.institutional_metadata).selectinload(
+                    InstitutionalReportMetadata.institution
+                )
+            )
+            .order_by(*_document_order_by())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).all()
+
+        return PageResult(
+            items=cls._document_query_items(rows, context),
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+            total_pages=max(
+                1, (total_items + per_page - 1) // per_page
+            ),
+        )
+
+    @classmethod
+    def list_institutional_reports(
+        cls,
+        company_id: str,
+        *,
+        latest_per_institution: bool,
+        page: int,
+        per_page: int,
+        context: ResearchAccessContext,
+    ) -> PageResult:
+        """Return rights-safe institutional metadata."""
+
+        _validate_document_page_bounds(page, per_page)
+        if not isinstance(latest_per_institution, bool):
+            raise ResearchValidationError(
+                {
+                    "latest_per_institution": [
+                        "Must be a boolean"
+                    ]
+                }
+            )
+        if not _company_exists(company_id):
+            raise ResearchNotFoundError(
+                "company_not_found", "Company was not found"
+            )
+
+        statement = (
+            sa.select(Document)
+            .join(
+                DocumentCompanyLink,
+                DocumentCompanyLink.document_id == Document.id,
+            )
+            .join(
+                InstitutionalReportMetadata,
+                InstitutionalReportMetadata.document_id == Document.id,
+            )
+            .where(
+                DocumentCompanyLink.company_id == company_id,
+                Document.document_type
+                == DocumentType.INSTITUTIONAL_RESEARCH,
+                _document_visibility_predicate(context),
+            )
+        )
+        if latest_per_institution:
+            latest_ids = cls._latest_institutional_report_ids(
+                company_id,
+                context,
+            )
+            statement = statement.where(Document.id.in_(latest_ids))
+
+        total_items = (
+            db.session.scalar(
+                sa.select(sa.func.count()).select_from(
+                    statement.subquery()
+                )
+            )
+            or 0
+        )
+        rows = db.session.scalars(
+            statement.options(
+                selectinload(Document.institutional_metadata).selectinload(
+                    InstitutionalReportMetadata.institution
+                )
+            )
+            .order_by(*_document_order_by())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).all()
+
+        return PageResult(
+            items=cls._document_query_items(rows, context),
+            page=page,
+            per_page=per_page,
+            total_items=total_items,
+            total_pages=max(
+                1, (total_items + per_page - 1) // per_page
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _company_documents_statement(
+        cls,
+        company_id: str,
+        filters: dict[str, object],
+        context: ResearchAccessContext,
+    ):
+        statement = (
+            sa.select(Document)
+            .join(
+                DocumentCompanyLink,
+                DocumentCompanyLink.document_id == Document.id,
+            )
+            .where(
+                DocumentCompanyLink.company_id == company_id,
+                _document_visibility_predicate(context),
+            )
+        )
+
+        if (
+            "institution_id" in filters
+            or "report_type" in filters
+        ):
+            statement = statement.join(
+                InstitutionalReportMetadata,
+                InstitutionalReportMetadata.document_id == Document.id,
+            )
+        if "document_type" in filters:
+            statement = statement.where(
+                Document.document_type == filters["document_type"]
+            )
+        if "institution_id" in filters:
+            statement = statement.where(
+                InstitutionalReportMetadata.institution_id
+                == filters["institution_id"]
+            )
+        if "report_type" in filters:
+            statement = statement.where(
+                InstitutionalReportMetadata.report_type
+                == filters["report_type"]
+            )
+        if "date_from" in filters:
+            statement = statement.where(
+                Document.document_date >= filters["date_from"]
+            )
+        if "date_to" in filters:
+            statement = statement.where(
+                Document.document_date <= filters["date_to"]
+            )
+
+        return statement
+
+    @classmethod
+    def _latest_institutional_report_ids(
+        cls,
+        company_id: str,
+        context: ResearchAccessContext,
+    ):
+        """Select the newest visible report per institution for one company."""
+
+        ranked = (
+            sa.select(
+                InstitutionalReportMetadata.document_id.label(
+                    "document_id"
+                ),
+                sa.func.row_number()
+                .over(
+                    partition_by=(
+                        InstitutionalReportMetadata.institution_id
+                    ),
+                    order_by=_document_order_by(),
+                )
+                .label("report_rank"),
+            )
+            .join(
+                Document,
+                Document.id
+                == InstitutionalReportMetadata.document_id,
+            )
+            .join(
+                DocumentCompanyLink,
+                DocumentCompanyLink.document_id == Document.id,
+            )
+            .where(
+                DocumentCompanyLink.company_id == company_id,
+                Document.document_type
+                == DocumentType.INSTITUTIONAL_RESEARCH,
+                _document_visibility_predicate(context),
+            )
+            .subquery()
+        )
+        return sa.select(ranked.c.document_id).where(
+            ranked.c.report_rank == 1
+        )
+
+    @classmethod
+    def _document_query_items(
+        cls,
+        documents: list[Document],
+        context: ResearchAccessContext,
+    ) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        for document in documents:
+            decision = DocumentAccessPolicy.evaluate(document, context)
+            if decision.visible:
+                items.append(
+                    cls._document_query_payload(document, decision)
+                )
+        return items
+
+    @classmethod
+    def _document_query_payload(
+        cls,
+        document: Document,
+        decision: DocumentAccessDecision,
+    ) -> dict[str, object]:
+        payload = DocumentAccessPolicy.project(document, decision)
+        institutional_report = cls._institutional_report_projection(
+            document
+        )
+        if institutional_report is not None:
+            payload["institutional_report"] = institutional_report
+        return payload
+
+    @staticmethod
+    def _institutional_report_projection(
+        document: Document,
+    ) -> dict[str, object] | None:
+        metadata = document.institutional_metadata
+        if metadata is None:
+            return None
+
+        institution = metadata.institution
+        return {
+            "institution_id": metadata.institution_id,
+            "institution_name": (
+                institution.name
+                if institution is not None
+                else None
+            ),
+            "report_type": metadata.report_type,
+        }
+
+    @staticmethod
+    def _document_not_found() -> ResearchNotFoundError:
+        return ResearchNotFoundError(
+            "document_not_found", "Document was not found"
+        )
 
     @staticmethod
     def _resolve_companies(company_links: list[dict]) -> list[Company]:
