@@ -84,6 +84,7 @@ class OriginalPublicationPrecision:
 
 
 class DocumentAuditEventType:
+    METADATA_CHANGED = "METADATA_CHANGED"
     SOURCE_ACCESS_CHANGED = "SOURCE_ACCESS_CHANGED"
     ACQUISITION_METHOD_CHANGED = "ACQUISITION_METHOD_CHANGED"
     DISTRIBUTION_STATUS_CHANGED = "DISTRIBUTION_STATUS_CHANGED"
@@ -384,6 +385,7 @@ class DocumentAuditEvent(BaseModel):
         enum_type(
             "document_audit_event_type",
             (
+                DocumentAuditEventType.METADATA_CHANGED,
                 DocumentAuditEventType.SOURCE_ACCESS_CHANGED,
                 DocumentAuditEventType.ACQUISITION_METHOD_CHANGED,
                 DocumentAuditEventType.DISTRIBUTION_STATUS_CHANGED,

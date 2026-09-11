@@ -335,6 +335,7 @@ def test_state_columns_are_portable_string_backed_closed_enums(app):
     )
     assert _enum_values(DocumentAuditEvent, "event_type") == (
         {
+            DocumentAuditEventType.METADATA_CHANGED,
             DocumentAuditEventType.SOURCE_ACCESS_CHANGED,
             DocumentAuditEventType.ACQUISITION_METHOD_CHANGED,
             DocumentAuditEventType.DISTRIBUTION_STATUS_CHANGED,

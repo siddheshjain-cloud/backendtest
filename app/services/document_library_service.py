@@ -118,6 +118,13 @@ _RIGHTS_FIELDS = frozenset(
     }
 )
 
+_METADATA_AUDIT_FIELDS = frozenset(_PATCHABLE_FIELDS).difference(
+    _STATE_AUDIT_FIELDS,
+    _STORAGE_FIELDS,
+    _RIGHTS_FIELDS,
+    {"archived_at"},
+)
+
 _REASON_REQUIRED_FIELDS = frozenset(
     {
         "document_type",
@@ -387,6 +394,10 @@ class DocumentLibraryService:
                 cls._resolve_institution(
                     institutional_report["institution_id"]
                 )
+            cls._validate_supersedes_lineage(
+                None,
+                document_values.get("supersedes_document_id"),
+            )
 
             fingerprint = DocumentDeduplicationService.metadata_fingerprint(
                 document_type=document_values["document_type"],
@@ -684,6 +695,12 @@ class DocumentLibraryService:
                     proposed[field],
                 )
             }
+
+            if "supersedes_document_id" in normalized:
+                cls._validate_supersedes_lineage(
+                    document.id,
+                    proposed["supersedes_document_id"],
+                )
 
             if (
                 changed_fields
@@ -1252,6 +1269,21 @@ class DocumentLibraryService:
 
         events: list[DocumentAuditEvent] = []
 
+        for field in sorted(
+            _METADATA_AUDIT_FIELDS.intersection(changed_fields)
+        ):
+            events.append(
+                DocumentAuditEvent(
+                    document_id=document.id,
+                    event_type=DocumentAuditEventType.METADATA_CHANGED,
+                    field_changed=field,
+                    old_value=cls._json_safe(getattr(document, field)),
+                    new_value=cls._json_safe(proposed[field]),
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                )
+            )
+
         for field, event_type in _STATE_AUDIT_FIELDS.items():
             if field in changed_fields:
                 events.append(
@@ -1320,6 +1352,34 @@ class DocumentLibraryService:
             )
 
         return events
+
+    @staticmethod
+    def _validate_supersedes_lineage(
+        document_id: str | None,
+        supersedes_document_id: object,
+    ) -> None:
+        """Reject a predecessor pointer that reaches itself or another cycle."""
+
+        if supersedes_document_id is None:
+            return
+
+        predecessor_id = str(supersedes_document_id)
+        visited: set[str] = set()
+        while predecessor_id is not None:
+            if predecessor_id == document_id or predecessor_id in visited:
+                raise ResearchValidationError(
+                    {
+                        "supersedes_document_id": [
+                            "Corrected/reissued lineage cannot contain a cycle"
+                        ]
+                    }
+                )
+            visited.add(predecessor_id)
+            predecessor_id = db.session.scalar(
+                sa.select(Document.supersedes_document_id)
+                .where(Document.id == predecessor_id)
+                .with_for_update()
+            )
 
     @staticmethod
     def _values_equal(left: object, right: object) -> bool:

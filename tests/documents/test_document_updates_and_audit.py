@@ -200,6 +200,17 @@ def _event_by_type(
     )
 
 
+def _event_by_field(
+    document_id: str, field_changed: str
+) -> DocumentAuditEvent | None:
+    return db.session.scalar(
+        sa.select(DocumentAuditEvent).where(
+            DocumentAuditEvent.document_id == document_id,
+            DocumentAuditEvent.field_changed == field_changed,
+        )
+    )
+
+
 def test_update_source_access_writes_focused_audit_without_fingerprint_change(
     app, admin_user, company
 ):
@@ -632,6 +643,187 @@ def test_noncanonical_metadata_change_does_not_recompute_fingerprint(
     assert persisted.discovery_source_type == DiscoverySourceType.TELEGRAM
     assert persisted.discovery_source_reference == "Telegram research channel"
     assert persisted.metadata_fingerprint == original_fingerprint
+
+
+def test_provenance_changes_write_metadata_audit_events(
+    app, admin_user, company
+):
+    document = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+
+    DocumentLibraryService.update_document(
+        document_id=document.id,
+        changes={
+            "publisher_reference": "Corrected publisher reference",
+            "discovery_source_type": DiscoverySourceType.TELEGRAM,
+            "discovery_source_reference": "Telegram research channel",
+        },
+        actor_user_id=admin_user.id,
+        reason="Correct discovery provenance",
+    )
+
+    assert _audit_count(document.id) == 3
+    for field, old_value, new_value in (
+        (
+            "publisher_reference",
+            None,
+            "Corrected publisher reference",
+        ),
+        (
+            "discovery_source_type",
+            DiscoverySourceType.OFFICIAL_SITE,
+            DiscoverySourceType.TELEGRAM,
+        ),
+        (
+            "discovery_source_reference",
+            None,
+            "Telegram research channel",
+        ),
+    ):
+        event = _event_by_field(document.id, field)
+        assert event is not None
+        assert event.event_type == DocumentAuditEventType.METADATA_CHANGED
+        assert event.old_value == old_value
+        assert event.new_value == new_value
+        assert event.actor_user_id == admin_user.id
+        assert event.reason == "Correct discovery provenance"
+
+
+def test_supersedes_change_writes_metadata_audit_event(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        document=_document_fields(title="Original annual report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(title="Corrected annual report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+
+    DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={"supersedes_document_id": original.id},
+        actor_user_id=admin_user.id,
+        reason="Link corrected report to its predecessor",
+    )
+
+    event = _event_by_field(corrected.id, "supersedes_document_id")
+    assert event is not None
+    assert event.event_type == DocumentAuditEventType.METADATA_CHANGED
+    assert event.old_value is None
+    assert event.new_value == original.id
+    assert event.reason == "Link corrected report to its predecessor"
+
+
+def test_update_rejects_two_document_supersession_cycle(
+    app, admin_user, company
+):
+    first = _create_document(
+        admin_user,
+        document=_document_fields(title="First report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    second = _create_document(
+        admin_user,
+        document=_document_fields(title="Second report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.update_document(
+        document_id=first.id,
+        changes={"supersedes_document_id": second.id},
+        actor_user_id=admin_user.id,
+        reason="First correction link",
+    )
+
+    with pytest.raises(ResearchValidationError) as exc_info:
+        DocumentLibraryService.update_document(
+            document_id=second.id,
+            changes={"supersedes_document_id": first.id},
+            actor_user_id=admin_user.id,
+            reason="Would close a two-document cycle",
+        )
+
+    assert "supersedes_document_id" in exc_info.value.details
+    assert db.session.get(Document, second.id).supersedes_document_id is None
+    assert _audit_count(second.id) == 0
+
+
+def test_update_rejects_longer_supersession_cycle(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        document=_document_fields(title="Original report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(title="Corrected report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    reissued = _create_document(
+        admin_user,
+        document=_document_fields(title="Reissued report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={"supersedes_document_id": original.id},
+        actor_user_id=admin_user.id,
+        reason="Correct the original",
+    )
+    DocumentLibraryService.update_document(
+        document_id=reissued.id,
+        changes={"supersedes_document_id": corrected.id},
+        actor_user_id=admin_user.id,
+        reason="Reissue the correction",
+    )
+
+    with pytest.raises(ResearchValidationError) as exc_info:
+        DocumentLibraryService.update_document(
+            document_id=original.id,
+            changes={"supersedes_document_id": reissued.id},
+            actor_user_id=admin_user.id,
+            reason="Would close a longer cycle",
+        )
+
+    assert "supersedes_document_id" in exc_info.value.details
+    assert db.session.get(Document, original.id).supersedes_document_id is None
+    assert _audit_count(original.id) == 0
+
+
+def test_create_preserves_valid_acyclic_supersession_chain(
+    app, admin_user, company
+):
+    original = _create_document(
+        admin_user,
+        document=_document_fields(title="Original chain report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(
+            title="Corrected chain report",
+            supersedes_document_id=original.id,
+        ),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    reissued = _create_document(
+        admin_user,
+        document=_document_fields(
+            title="Reissued chain report",
+            supersedes_document_id=corrected.id,
+        ),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+
+    assert corrected.supersedes_document_id == original.id
+    assert reissued.supersedes_document_id == corrected.id
 
 
 def test_update_requires_reason_for_actual_changes(
