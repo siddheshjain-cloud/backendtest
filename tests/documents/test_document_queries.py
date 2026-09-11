@@ -892,3 +892,211 @@ def test_list_company_documents_rejects_unknown_company(
 
     assert exc_info.value.code == "company_not_found"
     assert exc_info.value.message == "Company was not found"
+
+
+def test_latest_institutional_report_ranks_within_the_rights_visible_set(
+    app, admin_user, premium_user, user_factory, company
+):
+    provider = user_factory(email="report-provider@example.com")
+    institution = _make_institution("Alpha Research")
+    consumer_context = _context(
+        premium_user.id, tier=ResearchTier.PREMIUM
+    )
+    provider_context = _context(provider.id)
+    admin_context = _context(admin_user.id, is_admin=True)
+
+    public_old = _make_document(
+        identifier="90000000-0000-0000-0000-000000000001",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="Visible older report",
+        created_at=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 1, 1),
+        institution=institution,
+        report_type="RESULT_UPDATE",
+    )
+    private_new = _make_document(
+        identifier="90000000-0000-0000-0000-000000000002",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="PRIVATE-NEWEST-REPORT",
+        created_at=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 12, 1),
+        institution=institution,
+        report_type="INITIATING_COVERAGE",
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=provider.id,
+        storage_provider="object-store",
+        storage_key="opaque/object-store/private-key",
+        content_hash_sha256="f" * 64,
+    )
+
+    consumer_latest = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=1,
+        per_page=10,
+        context=consumer_context,
+    )
+    consumer_history = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=False,
+        page=1,
+        per_page=10,
+        context=consumer_context,
+    )
+    provider_latest = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=1,
+        per_page=10,
+        context=provider_context,
+    )
+    admin_latest = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=1,
+        per_page=10,
+        context=admin_context,
+    )
+
+    # The unrelated provider's newer private report must neither hide the
+    # older visible report nor contribute a count or value to the consumer.
+    assert [item["id"] for item in consumer_latest.items] == [
+        public_old.id
+    ]
+    assert consumer_latest.total_items == 1
+    assert [item["id"] for item in consumer_history.items] == [
+        public_old.id
+    ]
+    assert "PRIVATE-NEWEST-REPORT" not in str(consumer_latest.items)
+    assert "PRIVATE-NEWEST-REPORT" not in str(consumer_history.items)
+    _assert_consumer_restricted_fields_absent(consumer_latest.items)
+    _assert_storage_absent(consumer_latest.items)
+
+    # Inside the private context the newest report is the current one.
+    assert [item["id"] for item in provider_latest.items] == [
+        private_new.id
+    ]
+    assert [item["id"] for item in admin_latest.items] == [
+        private_new.id
+    ]
+
+
+def test_institutional_history_remains_paginated_while_latest_is_one_per_institution(
+    app, admin_user, premium_user, company
+):
+    institution_a = _make_institution("Alpha Research")
+    institution_b = _make_institution("Beta Research")
+    context = _context(premium_user.id, tier=ResearchTier.PREMIUM)
+    base_time = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+
+    alpha_newest = _make_document(
+        identifier="91000000-0000-0000-0000-000000000001",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="Alpha newest",
+        created_at=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 8, 1),
+        institution=institution_a,
+        report_type="RESULT_UPDATE",
+    )
+    alpha_middle = _make_document(
+        identifier="91000000-0000-0000-0000-000000000002",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="Alpha middle",
+        created_at=base_time,
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 5, 1),
+        institution=institution_a,
+        report_type="RESULT_UPDATE",
+    )
+    alpha_oldest = _make_document(
+        identifier="91000000-0000-0000-0000-000000000003",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="Alpha oldest",
+        created_at=base_time,
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 2, 1),
+        institution=institution_a,
+        report_type="INITIATING_COVERAGE",
+    )
+    beta_newest = _make_document(
+        identifier="91000000-0000-0000-0000-000000000004",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="Beta newest",
+        created_at=base_time,
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 9, 1),
+        institution=institution_b,
+        report_type="RESULT_UPDATE",
+    )
+
+    history_page_one = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=False,
+        page=1,
+        per_page=2,
+        context=context,
+    )
+    history_page_two = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=False,
+        page=2,
+        per_page=2,
+        context=context,
+    )
+    latest_page_one = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=1,
+        per_page=1,
+        context=context,
+    )
+    latest_page_two = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=2,
+        per_page=1,
+        context=context,
+    )
+
+    assert history_page_one.total_items == 4
+    assert history_page_one.total_pages == 2
+    assert [item["id"] for item in history_page_one.items] == [
+        beta_newest.id,
+        alpha_newest.id,
+    ]
+    assert [item["id"] for item in history_page_two.items] == [
+        alpha_middle.id,
+        alpha_oldest.id,
+    ]
+    assert [
+        item["id"]
+        for result in (history_page_one, history_page_two)
+        for item in result.items
+    ] == [
+        beta_newest.id,
+        alpha_newest.id,
+        alpha_middle.id,
+        alpha_oldest.id,
+    ]
+    assert latest_page_one.total_items == 2
+    assert latest_page_one.total_pages == 2
+    assert [item["id"] for item in latest_page_one.items] == [
+        beta_newest.id
+    ]
+    assert [item["id"] for item in latest_page_two.items] == [
+        alpha_newest.id
+    ]
+    assert DocumentLibraryService.get_document(
+        alpha_oldest.id, context
+    )["title"] == "Alpha oldest"
