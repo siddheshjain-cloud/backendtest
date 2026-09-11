@@ -806,7 +806,7 @@ class DocumentLibraryService:
         if not decision.visible:
             raise cls._document_not_found()
 
-        return cls._document_query_payload(document, decision)
+        return cls._document_query_payload(document, decision, context)
 
     @classmethod
     def list_company_documents(
@@ -1049,7 +1049,7 @@ class DocumentLibraryService:
             decision = DocumentAccessPolicy.evaluate(document, context)
             if decision.visible:
                 items.append(
-                    cls._document_query_payload(document, decision)
+                    cls._document_query_payload(document, decision, context)
                 )
         return items
 
@@ -1058,8 +1058,19 @@ class DocumentLibraryService:
         cls,
         document: Document,
         decision: DocumentAccessDecision,
+        context: ResearchAccessContext,
     ) -> dict[str, object]:
         payload = DocumentAccessPolicy.project(document, decision)
+        if "supersedes_document_id" in payload:
+            predecessor = document.supersedes
+            predecessor_visible = (
+                predecessor is not None
+                and DocumentAccessPolicy.evaluate(
+                    predecessor, context
+                ).visible
+            )
+            if not predecessor_visible:
+                payload["supersedes_document_id"] = None
         institutional_report = cls._institutional_report_projection(
             document
         )

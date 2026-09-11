@@ -121,6 +121,7 @@ def _make_document(
     institution: Institution | None = None,
     report_type: str | None = None,
     analyst_name: str | None = None,
+    supersedes_document_id: str | None = None,
     archived_at: datetime | None = None,
     is_primary: bool = True,
     second_company: Company | None = None,
@@ -159,6 +160,7 @@ def _make_document(
         metadata_fingerprint=(
             metadata_fingerprint or _fingerprint(identifier)
         ),
+        supersedes_document_id=supersedes_document_id,
         mime_type=mime_type,
         file_size_bytes=file_size_bytes,
         provided_by_user_id=provided_by_user_id,
@@ -892,6 +894,139 @@ def test_list_company_documents_rejects_unknown_company(
 
     assert exc_info.value.code == "company_not_found"
     assert exc_info.value.message == "Company was not found"
+
+
+def test_document_query_paths_hide_cross_provider_supersedes_document_id(
+    app, admin_user, user_factory, company
+):
+    provider = user_factory(email="supersedes-provider@example.com")
+    other_provider = user_factory(
+        email="supersedes-other-provider@example.com"
+    )
+    provider_context = _context(provider.id)
+    admin_context = _context(admin_user.id, is_admin=True)
+
+    predecessor = _make_document(
+        identifier="supersedes-predecessor",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="PREVIOUS-PROVIDER-PRIVATE",
+        created_at=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        document_date=date(2026, 7, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=other_provider.id,
+    )
+    current = _make_document(
+        identifier="supersedes-current",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="CURRENT-PROVIDER-PRIVATE",
+        created_at=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+        document_date=date(2026, 8, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=provider.id,
+        supersedes_document_id=predecessor.id,
+    )
+
+    detail = DocumentLibraryService.get_document(
+        current.id, provider_context
+    )
+    listing = DocumentLibraryService.list_company_documents(
+        company.id, {}, 1, 20, provider_context
+    )
+    current_item = next(
+        item for item in listing.items if item["id"] == current.id
+    )
+
+    assert current.supersedes_document_id == predecessor.id
+    assert detail["supersedes_document_id"] is None
+    assert current_item["supersedes_document_id"] is None
+    assert predecessor.id not in str(detail)
+    assert predecessor.id not in str(listing.items)
+
+    admin_detail = DocumentLibraryService.get_document(
+        current.id, admin_context
+    )
+    assert admin_detail["supersedes_document_id"] == predecessor.id
+
+
+def test_institutional_query_hides_cross_provider_supersedes_document_id(
+    app, admin_user, user_factory, company
+):
+    provider = user_factory(email="inst-supersedes-provider@example.com")
+    other_provider = user_factory(
+        email="inst-supersedes-other-provider@example.com"
+    )
+    institution = _make_institution("Rights Research")
+    provider_context = _context(provider.id)
+
+    predecessor = _make_document(
+        identifier="inst-supersedes-predecessor",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="PREVIOUS-INST-PROVIDER-PRIVATE",
+        created_at=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 7, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=other_provider.id,
+        institution=institution,
+        report_type="RESULT_UPDATE",
+    )
+    current = _make_document(
+        identifier="inst-supersedes-current",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="CURRENT-INST-PROVIDER-PRIVATE",
+        created_at=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+        document_type=DocumentType.INSTITUTIONAL_RESEARCH,
+        document_date=date(2026, 8, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=provider.id,
+        institution=institution,
+        report_type="RESULT_UPDATE",
+        supersedes_document_id=predecessor.id,
+    )
+
+    detail = DocumentLibraryService.get_document(
+        current.id, provider_context
+    )
+    history = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=False,
+        page=1,
+        per_page=10,
+        context=provider_context,
+    )
+    latest = DocumentLibraryService.list_institutional_reports(
+        company.id,
+        latest_per_institution=True,
+        page=1,
+        per_page=10,
+        context=provider_context,
+    )
+    history_item = next(
+        item for item in history.items if item["id"] == current.id
+    )
+    latest_item = next(
+        item for item in latest.items if item["id"] == current.id
+    )
+
+    assert current.supersedes_document_id == predecessor.id
+    assert detail["supersedes_document_id"] is None
+    assert history_item["supersedes_document_id"] is None
+    assert latest_item["supersedes_document_id"] is None
+    assert predecessor.id not in str(detail)
+    assert predecessor.id not in str(history.items)
+    assert predecessor.id not in str(latest.items)
 
 
 def test_latest_institutional_report_ranks_within_the_rights_visible_set(
