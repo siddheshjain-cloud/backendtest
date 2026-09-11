@@ -486,6 +486,217 @@ def test_metadata_duplicate_conflicts_before_insertion(
     }
 
 
+def test_matching_fingerprint_is_allowed_for_its_direct_predecessor(
+    app, admin_user, company
+):
+    original = DocumentLibraryService.create_document(
+        _payload(
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ]
+        ),
+        actor_user_id=admin_user.id,
+    )
+
+    corrected = DocumentLibraryService.create_document(
+        _payload(
+            document=_document_fields(
+                supersedes_document_id=original.id,
+            ),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        ),
+        actor_user_id=admin_user.id,
+    )
+
+    assert corrected.supersedes_document_id == original.id
+    assert corrected.metadata_fingerprint == original.metadata_fingerprint
+    assert _aggregate_counts() == {
+        "documents": 2,
+        "links": 2,
+        "metadata": 0,
+        "audit": 0,
+    }
+
+
+def test_matching_fingerprint_rejects_an_unrelated_predecessor(
+    app, admin_user, company
+):
+    DocumentLibraryService.create_document(
+        _payload(
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ]
+        ),
+        actor_user_id=admin_user.id,
+    )
+    unrelated = DocumentLibraryService.create_document(
+        _payload(
+            document=_document_fields(title="Unrelated annual report"),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        ),
+        actor_user_id=admin_user.id,
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.create_document(
+            _payload(
+                document=_document_fields(
+                    supersedes_document_id=unrelated.id,
+                ),
+                company_links=[
+                    {"company_id": company.id, "is_primary": True}
+                ],
+            ),
+            actor_user_id=admin_user.id,
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    assert _aggregate_counts()["documents"] == 2
+
+
+def test_matching_fingerprint_rejects_a_second_direct_successor(
+    app, admin_user, company
+):
+    payload = _payload(
+        company_links=[{"company_id": company.id, "is_primary": True}]
+    )
+    original = DocumentLibraryService.create_document(
+        payload,
+        actor_user_id=admin_user.id,
+    )
+    correction_payload = _payload(
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.create_document(
+        correction_payload,
+        actor_user_id=admin_user.id,
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.create_document(
+            correction_payload,
+            actor_user_id=admin_user.id,
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    assert _aggregate_counts()["documents"] == 2
+
+
+def test_matching_fingerprint_allows_a_direct_reissue_chain(
+    app, admin_user, company
+):
+    original = DocumentLibraryService.create_document(
+        _payload(
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ]
+        ),
+        actor_user_id=admin_user.id,
+    )
+    corrected = DocumentLibraryService.create_document(
+        _payload(
+            document=_document_fields(
+                supersedes_document_id=original.id,
+            ),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        ),
+        actor_user_id=admin_user.id,
+    )
+
+    reissued = DocumentLibraryService.create_document(
+        _payload(
+            document=_document_fields(
+                supersedes_document_id=corrected.id,
+            ),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        ),
+        actor_user_id=admin_user.id,
+    )
+
+    assert reissued.supersedes_document_id == corrected.id
+    assert reissued.metadata_fingerprint == original.metadata_fingerprint
+    assert _aggregate_counts()["documents"] == 3
+
+
+def test_exact_binary_match_remains_rejected_for_a_direct_predecessor(
+    app, admin_user, company
+):
+    payload = _payload(
+        document=_stored_document_fields(),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    original = DocumentLibraryService.create_document(
+        payload,
+        actor_user_id=admin_user.id,
+    )
+    reissue_fields = _stored_document_fields()
+    reissue_fields["supersedes_document_id"] = original.id
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.create_document(
+            _payload(
+                document=reissue_fields,
+                company_links=[
+                    {"company_id": company.id, "is_primary": True}
+                ],
+            ),
+            actor_user_id=admin_user.id,
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    assert _aggregate_counts()["documents"] == 1
+
+
+def test_same_fingerprint_sibling_race_is_rejected_by_database_constraint(
+    app, admin_user, company, monkeypatch
+):
+    payload = _payload(
+        company_links=[{"company_id": company.id, "is_primary": True}]
+    )
+    original = DocumentLibraryService.create_document(
+        payload,
+        actor_user_id=admin_user.id,
+    )
+    correction_payload = _payload(
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.create_document(
+        correction_payload,
+        actor_user_id=admin_user.id,
+    )
+
+    def _stale_direct_match(**_kwargs: object) -> DuplicateDecision:
+        return DuplicateDecision(
+            kind="METADATA_MATCH",
+            matched_document_id=original.id,
+        )
+
+    monkeypatch.setattr(
+        DocumentDeduplicationService,
+        "find_duplicate",
+        staticmethod(_stale_direct_match),
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.create_document(
+            correction_payload,
+            actor_user_id=admin_user.id,
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    assert _aggregate_counts()["documents"] == 2
+
+
 def test_exact_binary_duplicate_conflicts_before_insertion(
     app, admin_user, company
 ):

@@ -209,6 +209,7 @@ def test_document_tables_have_exact_columns_and_nullability(app):
         "storage_key": True,
         "content_hash_sha256": True,
         "metadata_fingerprint": False,
+        "is_fingerprint_duplicate": False,
         "mime_type": True,
         "file_size_bytes": True,
         "provided_by_user_id": True,

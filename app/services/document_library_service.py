@@ -426,7 +426,21 @@ class DocumentLibraryService:
                     "content_hash_sha256"
                 ),
             )
-            if decision.kind != "NONE":
+            supersedes_document_id = document_values.get(
+                "supersedes_document_id"
+            )
+            is_direct_metadata_reissue = (
+                decision.kind == "METADATA_MATCH"
+                and supersedes_document_id is not None
+                and db.session.scalar(
+                    sa.select(Document.id).where(
+                        Document.id == supersedes_document_id,
+                        Document.metadata_fingerprint == fingerprint,
+                    )
+                )
+                is not None
+            )
+            if decision.kind != "NONE" and not is_direct_metadata_reissue:
                 raise ResearchConflictError(
                     "document_duplicate",
                     "Document requires duplicate review",
@@ -435,6 +449,7 @@ class DocumentLibraryService:
             document = Document(
                 created_by_user_id=actor_user_id,
                 metadata_fingerprint=fingerprint,
+                is_fingerprint_duplicate=is_direct_metadata_reissue,
                 **document_values,
             )
             db.session.add(document)
@@ -602,13 +617,19 @@ class DocumentLibraryService:
                 document.metadata_fingerprint,
             )
 
+            successor = cls._direct_successor_using_fingerprint_slot(document)
+            document.metadata_fingerprint = proposed_fingerprint
+            document.is_fingerprint_duplicate = False
+            db.session.flush([document])
+            if successor is not None:
+                successor.is_fingerprint_duplicate = False
+
             new_link = DocumentCompanyLink(
                 document_id=document_id,
                 company_id=company_id,
                 is_primary=is_primary,
             )
             db.session.add(new_link)
-            document.metadata_fingerprint = proposed_fingerprint
 
             new_snapshot = cls._company_link_snapshot(
                 existing_links + [new_link],
@@ -701,6 +722,14 @@ class DocumentLibraryService:
                     document.id,
                     proposed["supersedes_document_id"],
                 )
+                if (
+                    "supersedes_document_id" in changed_fields
+                    and document.is_fingerprint_duplicate
+                ):
+                    raise ResearchConflictError(
+                        "document_duplicate",
+                        "Document requires duplicate review",
+                    )
 
             if (
                 changed_fields
@@ -765,7 +794,16 @@ class DocumentLibraryService:
                             "document_duplicate",
                             "Document requires duplicate review",
                         )
+                    successor = (
+                        cls._direct_successor_using_fingerprint_slot(
+                            document
+                        )
+                    )
                     document.metadata_fingerprint = proposed_fingerprint
+                    document.is_fingerprint_duplicate = False
+                    db.session.flush([document])
+                    if successor is not None:
+                        successor.is_fingerprint_duplicate = False
 
             audit_events = cls._build_audit_events(
                 document,
@@ -1223,7 +1261,8 @@ class DocumentLibraryService:
         message = str(original)
         return (
             "document.metadata_fingerprint" in message
-            or "uq_document_metadata_fingerprint" in message
+            or "uq_document_metadata_fingerprint_ordinary" in message
+            or "uq_document_metadata_fingerprint_successor" in message
             or "UNIQUE constraint failed: document.metadata_fingerprint"
             in message
         )
@@ -1380,6 +1419,23 @@ class DocumentLibraryService:
                 .where(Document.id == predecessor_id)
                 .with_for_update()
             )
+
+    @staticmethod
+    def _direct_successor_using_fingerprint_slot(
+        document: Document,
+    ) -> Document | None:
+        """Return the direct successor holding this fingerprint's slot 1."""
+
+        return db.session.scalar(
+            sa.select(Document)
+            .where(
+                Document.supersedes_document_id == document.id,
+                Document.metadata_fingerprint
+                == document.metadata_fingerprint,
+                Document.is_fingerprint_duplicate.is_(True),
+            )
+            .with_for_update()
+        )
 
     @staticmethod
     def _values_equal(left: object, right: object) -> bool:

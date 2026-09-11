@@ -33,6 +33,7 @@ from app.models.document import (
 )
 from app.services.document_deduplication_service import (
     DocumentDeduplicationService,
+    DuplicateDecision,
 )
 from app.services.document_library_service import DocumentLibraryService
 from app.utils.research_errors import (
@@ -259,6 +260,47 @@ def test_add_company_link_recomputes_fingerprint_and_writes_focused_audit(
         "primary_company_id": company.id,
         "metadata_fingerprint": expected_fingerprint,
     }
+
+
+def test_link_change_restores_ordinary_fingerprint_race_guard(
+    app, admin_user, company, second_company, monkeypatch
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.add_company_link(
+        document_id=corrected.id,
+        company_id=second_company.id,
+        is_primary=False,
+        actor_user_id=admin_user.id,
+        reason="Add corrected peer-company coverage",
+    )
+
+    def _stale_no_match(**_kwargs: object) -> DuplicateDecision:
+        return DuplicateDecision(kind="NONE", matched_document_id=None)
+
+    monkeypatch.setattr(
+        DocumentDeduplicationService,
+        "find_duplicate",
+        staticmethod(_stale_no_match),
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            company_links=[
+                {"company_id": company.id, "is_primary": True},
+                {"company_id": second_company.id, "is_primary": False},
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"
 
 
 def test_duplicate_company_link_is_rejected_without_mutation(

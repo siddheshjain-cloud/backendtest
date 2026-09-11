@@ -244,6 +244,14 @@ class Document(BaseModel):
     metadata_fingerprint: so.Mapped[str] = so.mapped_column(
         sa.String(64), nullable=False
     )
+    # True only when this row directly supersedes a predecessor with the same
+    # canonical fingerprint. Ordinary rows remain globally unique.
+    is_fingerprint_duplicate: so.Mapped[bool] = so.mapped_column(
+        sa.Boolean,
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
     mime_type: so.Mapped[str | None] = so.mapped_column(
         sa.String(100), nullable=True
     )
@@ -276,9 +284,24 @@ class Document(BaseModel):
     )
 
     __table_args__ = (
-        sa.UniqueConstraint(
+        sa.Index(
+            "uq_document_metadata_fingerprint_ordinary",
             "metadata_fingerprint",
-            name="uq_document_metadata_fingerprint",
+            unique=True,
+            sqlite_where=sa.text("is_fingerprint_duplicate = 0"),
+            postgresql_where=sa.text("NOT is_fingerprint_duplicate"),
+        ),
+        sa.Index(
+            "uq_document_metadata_fingerprint_successor",
+            "metadata_fingerprint",
+            "supersedes_document_id",
+            unique=True,
+            sqlite_where=sa.text("is_fingerprint_duplicate = 1"),
+            postgresql_where=sa.text("is_fingerprint_duplicate"),
+        ),
+        sa.CheckConstraint(
+            "NOT is_fingerprint_duplicate OR supersedes_document_id IS NOT NULL",
+            name="ck_document_duplicate_requires_predecessor",
         ),
         sa.CheckConstraint(
             "supersedes_document_id IS NULL OR id != supersedes_document_id",

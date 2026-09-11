@@ -34,6 +34,7 @@ from app.models.document import (
 )
 from app.services.document_deduplication_service import (
     DocumentDeduplicationService,
+    DuplicateDecision,
 )
 from app.services.document_library_service import DocumentLibraryService
 from app.utils.research_errors import (
@@ -618,6 +619,91 @@ def test_canonical_metadata_change_recomputes_fingerprint(
     assert persisted.metadata_fingerprint != original_fingerprint
 
 
+def test_canonical_change_restores_ordinary_fingerprint_race_guard(
+    app, admin_user, company, monkeypatch
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={"title": "Corrected FY26 Annual Report"},
+        actor_user_id=admin_user.id,
+        reason="Correct the report title",
+    )
+
+    def _stale_no_match(**_kwargs: object) -> DuplicateDecision:
+        return DuplicateDecision(kind="NONE", matched_document_id=None)
+
+    monkeypatch.setattr(
+        DocumentDeduplicationService,
+        "find_duplicate",
+        staticmethod(_stale_no_match),
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            document=_document_fields(
+                title="Corrected FY26 Annual Report",
+            ),
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+
+
+def test_predecessor_canonical_change_transfers_the_old_race_guard(
+    app, admin_user, company, monkeypatch
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    DocumentLibraryService.update_document(
+        document_id=original.id,
+        changes={"title": "Original report retitled"},
+        actor_user_id=admin_user.id,
+        reason="Correct the original title",
+    )
+    assert (
+        db.session.get(Document, corrected.id).is_fingerprint_duplicate
+        is False
+    )
+
+    def _stale_no_match(**_kwargs: object) -> DuplicateDecision:
+        return DuplicateDecision(kind="NONE", matched_document_id=None)
+
+    monkeypatch.setattr(
+        DocumentDeduplicationService,
+        "find_duplicate",
+        staticmethod(_stale_no_match),
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+
+
 def test_noncanonical_metadata_change_does_not_recompute_fingerprint(
     app, admin_user, company
 ):
@@ -718,6 +804,39 @@ def test_supersedes_change_writes_metadata_audit_event(
     assert event.old_value is None
     assert event.new_value == original.id
     assert event.reason == "Link corrected report to its predecessor"
+
+
+@pytest.mark.parametrize("replacement", [None, "unrelated"])
+def test_same_fingerprint_successor_cannot_leave_its_direct_predecessor(
+    app, admin_user, company, replacement
+):
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    unrelated = _create_document(
+        admin_user,
+        document=_document_fields(title="Unrelated report"),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    replacement_id = unrelated.id if replacement == "unrelated" else None
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        DocumentLibraryService.update_document(
+            document_id=corrected.id,
+            changes={"supersedes_document_id": replacement_id},
+            actor_user_id=admin_user.id,
+            reason="Replace the predecessor link",
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+    assert corrected.supersedes_document_id == original.id
+    assert _audit_count(corrected.id) == 0
 
 
 def test_update_rejects_two_document_supersession_cycle(
