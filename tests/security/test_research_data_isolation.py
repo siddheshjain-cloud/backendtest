@@ -753,18 +753,19 @@ def test_stale_jwt_claim_is_rejected_at_the_real_request_boundary(
     )
 
 
-def test_no_authenticated_research_request_boundary_exists_in_frozen_scope(app):
-    """Guard for the deferred stale-JWT integration proof.
-
-    If an authenticated research endpoint is added, this test fails and the
-    deferred integration proof must be written against that real boundary
-    instead of the service-level substitute.
-    """
+def test_authenticated_research_request_boundary_exists(app):
+    """P5T5 added the real authenticated research boundary."""
 
     rules = sorted(str(rule) for rule in app.url_map.iter_rules())
     research_rules = [rule for rule in rules if "research" in rule.lower()]
-    assert research_rules == [], (
-        "An authenticated research request boundary now exists: extend the "
-        "stale-JWT test to exercise it end to end."
+    assert "/api/research/companies" in research_rules
+    assert "/api/research/companies/<company_id>" in research_rules
+    assert (
+        "/api/research/companies/<company_id>/disclosures"
+        in research_rules
+    )
+    assert (
+        "/api/research/companies/<company_id>/history"
+        in research_rules
     )
     assert "/api/auth/me" in rules
