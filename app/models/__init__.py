@@ -18,6 +18,8 @@ from .document import (
     DocumentAuditEvent,
     DocumentAuditEventType,
     DocumentCompanyLink,
+    DocumentContent,
+    DocumentStorageLocation,
     DocumentType,
     IngestionStatus,
     SourceAccess,

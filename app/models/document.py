@@ -101,6 +101,31 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class DocumentContent(BaseModel):
+    """Immutable binary identity keyed by a lowercase SHA-256 hex digest.
+
+    The row intentionally contains no business, company, filename, provider,
+    or storage-location metadata. Different documents that contain the same
+    bytes can point at the same identity, and one identity can have many
+    storage/provenance locations.
+    """
+
+    __tablename__ = "document_content"
+
+    sha256: so.Mapped[str] = so.mapped_column(
+        sa.String(64), nullable=False, unique=True
+    )
+
+    locations: so.Mapped[list["DocumentStorageLocation"]] = so.relationship(
+        "DocumentStorageLocation",
+        back_populates="content",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentContent {self.sha256[:12]}>"
+
+
 class Document(BaseModel):
     """One reference or stored copy in the common Document Library."""
 
@@ -232,14 +257,8 @@ class Document(BaseModel):
         ),
         nullable=False,
     )
-    storage_provider: so.Mapped[str | None] = so.mapped_column(
-        sa.String(50), nullable=True
-    )
-    storage_key: so.Mapped[str | None] = so.mapped_column(
-        sa.String(500), nullable=True
-    )
-    content_hash_sha256: so.Mapped[str | None] = so.mapped_column(
-        sa.String(64), nullable=True
+    content_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("document_content.id"), nullable=True
     )
     metadata_fingerprint: so.Mapped[str] = so.mapped_column(
         sa.String(64), nullable=False
@@ -311,6 +330,10 @@ class Document(BaseModel):
 
     # Unidirectional relationships; no reverse column or back-reference is
     # added to the legacy User model. ``storage_key`` is never projected.
+    content: so.Mapped["DocumentContent | None"] = so.relationship(
+        "DocumentContent",
+        foreign_keys=[content_id],
+    )
     company_links: so.Mapped[list["DocumentCompanyLink"]] = so.relationship(
         "DocumentCompanyLink",
         back_populates="document",
@@ -349,6 +372,133 @@ class Document(BaseModel):
 
     def __repr__(self) -> str:
         return f"<Document {self.document_type} {self.title!r}>"
+
+    @staticmethod
+    def _location_sort_key(
+        location: "DocumentStorageLocation",
+    ) -> tuple[object, object]:
+        return (
+            location.created_at
+            or datetime(1970, 1, 1, tzinfo=timezone.utc),
+            location.id or "",
+        )
+
+    def _current_storage_location(
+        self,
+    ) -> "DocumentStorageLocation | None":
+        if self.content is None:
+            return None
+        locations = self.content.locations
+        if not locations:
+            return None
+        return max(locations, key=self._location_sort_key)
+
+    def _legacy_storage_value(self, name: str) -> object:
+        if self.content is not None:
+            location = self._current_storage_location()
+            if location is not None:
+                return getattr(location, name)
+        return getattr(self, f"_legacy_{name}", None)
+
+    def _sync_legacy_storage_identity(self) -> None:
+        sha256 = getattr(self, "_legacy_content_hash_sha256", None)
+        if sha256 is None:
+            return
+        if self.content is None or self.content.sha256 != sha256:
+            existing_content = db.session.scalar(
+                sa.select(DocumentContent).where(
+                    DocumentContent.sha256 == sha256
+                )
+            )
+            self.content = existing_content or DocumentContent(
+                sha256=sha256
+            )
+
+        provider = getattr(self, "_legacy_storage_provider", None)
+        storage_key = getattr(self, "_legacy_storage_key", None)
+        if provider is None and storage_key is None:
+            return
+
+        if not any(
+            location.provider == provider
+            and location.storage_key == storage_key
+            for location in self.content.locations
+        ):
+            self.content.locations.append(
+                DocumentStorageLocation(
+                    provider=provider,
+                    storage_key=storage_key,
+                )
+            )
+
+    @property
+    def content_hash_sha256(self) -> str | None:
+        if self.content is not None:
+            return self.content.sha256
+        return getattr(self, "_legacy_content_hash_sha256", None)
+
+    @content_hash_sha256.setter
+    def content_hash_sha256(self, value: str | None) -> None:
+        self._legacy_content_hash_sha256 = value
+        self._sync_legacy_storage_identity()
+
+    @property
+    def storage_provider(self) -> str | None:
+        return self._legacy_storage_value("provider")
+
+    @storage_provider.setter
+    def storage_provider(self, value: str | None) -> None:
+        self._legacy_storage_provider = value
+        self._sync_legacy_storage_identity()
+
+    @property
+    def storage_key(self) -> str | None:
+        return self._legacy_storage_value("storage_key")
+
+    @storage_key.setter
+    def storage_key(self, value: str | None) -> None:
+        self._legacy_storage_key = value
+        self._sync_legacy_storage_identity()
+
+
+class DocumentStorageLocation(BaseModel):
+    """One storage or provenance location for immutable binary content."""
+
+    __tablename__ = "document_storage_location"
+
+    content_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("document_content.id"),
+        nullable=False,
+        index=True,
+    )
+    provider: so.Mapped[str | None] = so.mapped_column(
+        sa.String(50), nullable=True
+    )
+    storage_key: so.Mapped[str | None] = so.mapped_column(
+        sa.String(500), nullable=True
+    )
+    original_filename: so.Mapped[str | None] = so.mapped_column(
+        sa.String(300), nullable=True
+    )
+    source_reference: so.Mapped[str | None] = so.mapped_column(
+        sa.String(1000), nullable=True
+    )
+    updated_at: so.Mapped[datetime] = so.mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    content: so.Mapped["DocumentContent"] = so.relationship(
+        "DocumentContent", back_populates="locations"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentStorageLocation {self.provider} "
+            f"{self.storage_key!r}>"
+        )
 
 
 class DocumentCompanyLink(db.Model):
@@ -467,4 +617,15 @@ sa.event.listen(
 )
 sa.event.listen(
     DocumentAuditEvent, "before_delete", _reject_audit_delete
+)
+
+
+def _reject_content_sha256_update(_mapper, _connection, target) -> None:
+    raise sa.exc.InvalidRequestError(
+        "DocumentContent.sha256 is immutable"
+    )
+
+
+sa.event.listen(
+    DocumentContent, "before_update", _reject_content_sha256_update
 )

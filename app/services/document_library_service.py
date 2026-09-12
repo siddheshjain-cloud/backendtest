@@ -28,6 +28,8 @@ from app.models import (
     DocumentAuditEvent,
     DocumentAuditEventType,
     DocumentCompanyLink,
+    DocumentContent,
+    DocumentStorageLocation,
     DocumentType,
     IngestionStatus,
     Institution,
@@ -73,9 +75,6 @@ _PATCHABLE_FIELDS = (
     "acquisition_method",
     "distribution_status",
     "ingestion_status",
-    "storage_provider",
-    "storage_key",
-    "content_hash_sha256",
     "mime_type",
     "file_size_bytes",
     "provided_by_user_id",
@@ -109,6 +108,14 @@ _STORAGE_FIELDS = frozenset(
         "content_hash_sha256",
         "mime_type",
         "file_size_bytes",
+    }
+)
+
+_STORAGE_PATCH_FIELDS = frozenset(
+    {
+        "storage_provider",
+        "storage_key",
+        "content_hash_sha256",
     }
 )
 
@@ -387,6 +394,11 @@ class DocumentLibraryService:
     ) -> Document:
         aggregate = DocumentValidationService.validate_create(payload)
         document_values = dict(aggregate["document"])
+        content_hash_sha256 = document_values.pop(
+            "content_hash_sha256", None
+        )
+        storage_provider = document_values.pop("storage_provider", None)
+        storage_key = document_values.pop("storage_key", None)
         company_links = [
             dict(link) for link in aggregate.get("company_links", [])
         ]
@@ -428,9 +440,7 @@ class DocumentLibraryService:
 
             decision = DocumentDeduplicationService.find_duplicate(
                 metadata_fingerprint=fingerprint,
-                content_hash_sha256=document_values.get(
-                    "content_hash_sha256"
-                ),
+                content_hash_sha256=content_hash_sha256,
             )
             supersedes_document_id = document_values.get(
                 "supersedes_document_id"
@@ -460,6 +470,16 @@ class DocumentLibraryService:
             )
             db.session.add(document)
             db.session.flush()
+
+            if content_hash_sha256 is not None:
+                content = cls._find_or_create_content(content_hash_sha256)
+                document.content = content
+                if storage_provider is not None or storage_key is not None:
+                    cls._add_storage_location(
+                        content,
+                        provider=storage_provider,
+                        storage_key=storage_key,
+                    )
 
             for link in company_links:
                 db.session.add(
@@ -703,12 +723,20 @@ class DocumentLibraryService:
                     "Document was not found",
                 )
 
-            normalized = DocumentValidationService.validate_patch(
-                document, changes
+            normalized = dict(
+                DocumentValidationService.validate_patch(
+                    document, changes
+                )
             )
             DocumentValidationService.validate_transition(
                 document, changes
             )
+
+            storage_changes = {
+                field: normalized.pop(field)
+                for field in _STORAGE_PATCH_FIELDS
+                if field in normalized
+            }
 
             proposed = {
                 field: getattr(document, field)
@@ -718,10 +746,34 @@ class DocumentLibraryService:
 
             changed_fields = {
                 field
-                for field in normalized
+                for field in proposed
+                if field in normalized
                 if not cls._values_equal(
                     getattr(document, field),
                     proposed[field],
+                )
+            }
+
+            proposed_storage = {
+                "storage_provider": storage_changes.get(
+                    "storage_provider",
+                    document.storage_provider,
+                ),
+                "storage_key": storage_changes.get(
+                    "storage_key",
+                    document.storage_key,
+                ),
+                "content_hash_sha256": storage_changes.get(
+                    "content_hash_sha256",
+                    document.content_hash_sha256,
+                ),
+            }
+            storage_changed_fields = {
+                field
+                for field, new_value in proposed_storage.items()
+                if not cls._values_equal(
+                    getattr(document, field),
+                    new_value,
                 )
             }
 
@@ -797,7 +849,7 @@ class DocumentLibraryService:
                 if proposed_fingerprint != document.metadata_fingerprint:
                     decision = DocumentDeduplicationService.find_duplicate(
                         metadata_fingerprint=proposed_fingerprint,
-                        content_hash_sha256=proposed[
+                        content_hash_sha256=proposed_storage[
                             "content_hash_sha256"
                         ],
                         exclude_document_id=document.id,
@@ -834,14 +886,27 @@ class DocumentLibraryService:
                 in _STORED_INGESTION_STATUSES
             )
             content_hash_changed = (
-                proposed["content_hash_sha256"]
+                proposed_storage["content_hash_sha256"]
                 != document.content_hash_sha256
             )
             binary_identity_established = (
                 not was_stored
                 and will_be_stored
-                and proposed["content_hash_sha256"] is not None
+                and proposed_storage["content_hash_sha256"] is not None
             )
+            if (
+                document.content_hash_sha256 is not None
+                and content_hash_changed
+            ):
+                raise ResearchValidationError(
+                    {
+                        "content_hash_sha256": [
+                            "Stored binary content identity cannot be "
+                            "replaced in place; create a corrected/reissued "
+                            "document"
+                        ]
+                    }
+                )
             if (
                 not dedup_checked
                 and (
@@ -857,7 +922,7 @@ class DocumentLibraryService:
                 )
                 decision = DocumentDeduplicationService.find_duplicate(
                     metadata_fingerprint=fingerprint_for_duplicate,
-                    content_hash_sha256=proposed[
+                    content_hash_sha256=proposed_storage[
                         "content_hash_sha256"
                     ],
                     exclude_document_id=document.id,
@@ -871,10 +936,13 @@ class DocumentLibraryService:
                         "Document requires duplicate review",
                     )
 
+            audit_proposed = dict(proposed)
+            audit_proposed.update(proposed_storage)
+            audit_changed_fields = changed_fields | storage_changed_fields
             audit_events = cls._build_audit_events(
                 document,
-                proposed,
-                changed_fields,
+                audit_proposed,
+                audit_changed_fields,
                 actor_user_id,
                 reason,
             )
@@ -883,6 +951,18 @@ class DocumentLibraryService:
 
             for field in normalized:
                 setattr(document, field, proposed[field])
+
+            if storage_changed_fields or binary_identity_established:
+                cls._apply_storage_changes(
+                    document,
+                    content_hash_sha256=proposed_storage[
+                        "content_hash_sha256"
+                    ],
+                    storage_provider=proposed_storage[
+                        "storage_provider"
+                    ],
+                    storage_key=proposed_storage["storage_key"],
+                )
 
             db.session.commit()
         except IntegrityError as error:
@@ -1615,6 +1695,62 @@ class DocumentLibraryService:
         if value is None:
             return None
         return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _find_or_create_content(sha256: str) -> DocumentContent:
+        """Return the shared immutable content identity for a SHA-256."""
+
+        content = db.session.scalar(
+            sa.select(DocumentContent).where(
+                DocumentContent.sha256 == sha256
+            )
+        )
+        if content is not None:
+            return content
+
+        content = DocumentContent(sha256=sha256)
+        db.session.add(content)
+        db.session.flush()
+        return content
+
+    @staticmethod
+    def _add_storage_location(
+        content: DocumentContent,
+        *,
+        provider: str | None,
+        storage_key: str | None,
+    ) -> DocumentStorageLocation:
+        location = DocumentStorageLocation(
+            content_id=content.id,
+            provider=provider,
+            storage_key=storage_key,
+        )
+        db.session.add(location)
+        db.session.flush()
+        return location
+
+    @classmethod
+    def _apply_storage_changes(
+        cls,
+        document: Document,
+        *,
+        content_hash_sha256: str | None,
+        storage_provider: str | None,
+        storage_key: str | None,
+    ) -> None:
+        """Attach immutable content identity without mutating old bytes."""
+
+        if content_hash_sha256 is None:
+            return
+
+        content = cls._find_or_create_content(content_hash_sha256)
+        document.content = content
+        if storage_provider is not None or storage_key is not None:
+            cls._add_storage_location(
+                content,
+                provider=storage_provider,
+                storage_key=storage_key,
+            )
 
     @classmethod
     def _rights_snapshot(cls, source: object) -> dict[str, object]:

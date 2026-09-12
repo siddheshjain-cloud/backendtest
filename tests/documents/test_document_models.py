@@ -29,6 +29,8 @@ from app.models import (
     Document,
     DocumentAuditEvent,
     DocumentCompanyLink,
+    DocumentContent,
+    DocumentStorageLocation,
     Institution,
     InstitutionalReportMetadata,
 )
@@ -205,9 +207,7 @@ def test_document_tables_have_exact_columns_and_nullability(app):
         "acquisition_method": False,
         "distribution_status": False,
         "ingestion_status": False,
-        "storage_provider": True,
-        "storage_key": True,
-        "content_hash_sha256": True,
+        "content_id": True,
         "metadata_fingerprint": False,
         "is_fingerprint_duplicate": False,
         "mime_type": True,
@@ -219,6 +219,21 @@ def test_document_tables_have_exact_columns_and_nullability(app):
         "created_by_user_id": False,
         "updated_at": False,
         "archived_at": True,
+    }
+    assert _reflected_columns("document_content") == {
+        "id": False,
+        "created_at": False,
+        "sha256": False,
+    }
+    assert _reflected_columns("document_storage_location") == {
+        "id": False,
+        "created_at": False,
+        "content_id": False,
+        "provider": True,
+        "storage_key": True,
+        "original_filename": True,
+        "source_reference": True,
+        "updated_at": False,
     }
     assert _reflected_columns("document_company_link") == {
         "document_id": False,
@@ -398,13 +413,22 @@ def test_document_storage_fields_are_opaque_and_hash_lengths_are_fixed(
     assert len(persisted.content_hash_sha256) == 64
     assert len(persisted.metadata_fingerprint) == 64
 
-    assert isinstance(_column_type("document", "storage_key"), sa.String)
-    assert isinstance(_column_type("document", "storage_provider"), sa.String)
-    assert _column_type("document", "content_hash_sha256").length == 64
+    assert isinstance(
+        _column_type("document_storage_location", "storage_key"),
+        sa.String,
+    )
+    assert isinstance(
+        _column_type("document_storage_location", "provider"),
+        sa.String,
+    )
+    assert _column_type("document_content", "sha256").length == 64
     assert _column_type("document", "metadata_fingerprint").length == 64
     assert isinstance(_column_type("document", "file_size_bytes"), sa.BigInteger)
     assert not hasattr(Document, "storage_url")
-    assert "storage_url" not in Document.__table__.columns
+    assert "storage_provider" not in Document.__table__.columns
+    assert "storage_key" not in Document.__table__.columns
+    assert "content_hash_sha256" not in Document.__table__.columns
+    assert "content_id" in Document.__table__.columns
 
 
 def test_metadata_fingerprint_is_required_and_unique(app, admin_user, company):

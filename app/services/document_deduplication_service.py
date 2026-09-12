@@ -17,7 +17,7 @@ from datetime import date
 import sqlalchemy as sa
 
 from app import db
-from app.models.document import Document
+from app.models.document import Document, DocumentContent
 
 
 FINGERPRINT_VERSION = 1
@@ -157,10 +157,18 @@ class DocumentDeduplicationService:
             identity_filters.append(Document.id != exclude_document_id)
 
         if content_hash_sha256:
+            content_document_ids = (
+                sa.select(Document.id)
+                .join(
+                    DocumentContent,
+                    Document.content_id == DocumentContent.id,
+                )
+                .where(DocumentContent.sha256 == content_hash_sha256)
+            )
             content_match = db.session.scalar(
                 sa.select(Document)
                 .where(
-                    Document.content_hash_sha256 == content_hash_sha256,
+                    Document.id.in_(content_document_ids),
                     *identity_filters,
                 )
                 .order_by(Document.created_at, Document.id)
