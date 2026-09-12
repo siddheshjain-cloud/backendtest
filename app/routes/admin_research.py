@@ -16,11 +16,19 @@ from app.schemas.admin_research import (
     DisclosureResponseSchema,
     EntitlementPutSchema,
     EntitlementResponseSchema,
+    ForecastRevisionCreateSchema,
+    ForecastRevisionResponseSchema,
     GovernanceFlagCreateSchema,
     GovernanceFlagPatchSchema,
     GovernanceFlagResponseSchema,
+    MarketPlanRevisionCreateSchema,
+    MarketPlanRevisionResponseSchema,
     OwnershipSnapshotCreateSchema,
     OwnershipSnapshotResponseSchema,
+    ResearchRevisionCreateSchema,
+    ResearchRevisionResponseSchema,
+    ValuationRevisionCreateSchema,
+    ValuationRevisionResponseSchema,
     load_admin_payload,
 )
 from app.services.research_command_service import ResearchCommandService
@@ -132,6 +140,62 @@ def update_company_disclosure(disclosure_id: str):
         disclosure_id, _actor_user_id(), payload
     )
     return jsonify(DisclosureResponseSchema().dump(disclosure)), 200
+
+
+@admin_research_bp.route(
+    "/companies/<company_id>/research-revisions",
+    methods=["POST"],
+)
+@admin_required
+@research_error_boundary
+def create_research_revision(company_id: str):
+    payload = _request_payload(ResearchRevisionCreateSchema())
+    revision = ResearchCommandService.create_research_revision(
+        company_id, _actor_user_id(), payload
+    )
+    return jsonify(ResearchRevisionResponseSchema().dump(revision)), 201
+
+
+@admin_research_bp.route(
+    "/companies/<company_id>/market-plan-revisions",
+    methods=["POST"],
+)
+@admin_required
+@research_error_boundary
+def create_market_plan_revision(company_id: str):
+    payload = _request_payload(MarketPlanRevisionCreateSchema())
+    revision = ResearchCommandService.create_market_plan_revision(
+        company_id, _actor_user_id(), payload
+    )
+    return jsonify(MarketPlanRevisionResponseSchema().dump(revision)), 201
+
+
+@admin_research_bp.route(
+    "/companies/<company_id>/forecast-revisions",
+    methods=["POST"],
+)
+@admin_required
+@research_error_boundary
+def create_forecast_revision(company_id: str):
+    payload = _request_payload(ForecastRevisionCreateSchema())
+    revision = ResearchCommandService.create_forecast_revision(
+        company_id, _actor_user_id(), payload
+    )
+    return jsonify(ForecastRevisionResponseSchema().dump(revision)), 201
+
+
+@admin_research_bp.route(
+    "/companies/<company_id>/valuation-revisions",
+    methods=["POST"],
+)
+@admin_required
+@research_error_boundary
+def create_valuation_revision(company_id: str):
+    payload = _request_payload(ValuationRevisionCreateSchema())
+    revision = ResearchCommandService.create_valuation_revision(
+        company_id, _actor_user_id(), payload
+    )
+    return jsonify(ValuationRevisionResponseSchema().dump(revision)), 201
 
 
 @admin_entitlements_bp.route(

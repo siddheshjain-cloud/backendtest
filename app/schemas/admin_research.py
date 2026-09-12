@@ -17,7 +17,11 @@ from app.models.research_types import (
     EntitlementStatus,
     GovernanceFlagStatus,
     GovernanceSeverity,
+    GovernanceStatus,
+    ManagementQuality,
+    ResearchPointKind,
     ResearchTier,
+    ValuationMethod,
 )
 from app.utils.research_errors import ResearchValidationError
 
@@ -401,6 +405,381 @@ class InstitutionResponseSchema(Schema):
     updated_at = _UtcDateTime(dump_only=True)
 
 
+class ResearchPointCreateSchema(_StrictRequestSchema):
+    kind = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            (ResearchPointKind.CATALYST, ResearchPointKind.RISK)
+        ),
+    )
+    title = fields.Str(
+        required=True, validate=validate.Length(max=300)
+    )
+    detail = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    status = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=100)
+    )
+    target_date = fields.Date(load_default=None, allow_none=True)
+    sort_order = fields.Int(
+        required=True, validate=validate.Range(min=0)
+    )
+
+
+class ResearchRevisionCreateSchema(_StrictRequestSchema):
+    base_revision_id = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=36)
+    )
+    why_selected = fields.Str(
+        required=True, validate=validate.Length(max=4000)
+    )
+    what_is_changing = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    business_journey = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    thesis = fields.Str(
+        required=True, validate=validate.Length(max=4000)
+    )
+    thesis_invalidation = fields.Str(
+        required=True, validate=validate.Length(max=4000)
+    )
+    management_summary = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    management_quality = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            (
+                ManagementQuality.UNASSESSED,
+                ManagementQuality.WEAK,
+                ManagementQuality.WATCH,
+                ManagementQuality.ACCEPTABLE,
+                ManagementQuality.STRONG,
+            )
+        ),
+    )
+    management_rationale = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    management_evidence = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    governance_status = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            (
+                GovernanceStatus.UNREVIEWED,
+                GovernanceStatus.CLEAR,
+                GovernanceStatus.WATCH,
+                GovernanceStatus.HIGH_RISK,
+            )
+        ),
+    )
+    change_reason = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=2000)
+    )
+    effective_at = fields.DateTime(required=True)
+    points = fields.List(
+        fields.Nested(ResearchPointCreateSchema),
+        load_default=list,
+    )
+
+
+class MarketPlanRevisionCreateSchema(_StrictRequestSchema):
+    base_revision_id = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=36)
+    )
+    currency = fields.Str(
+        load_default="INR", validate=validate.Length(max=3)
+    )
+    accumulation_low = fields.Decimal(required=True)
+    accumulation_high = fields.Decimal(required=True)
+    preferred_accumulation_price = fields.Decimal(
+        load_default=None, allow_none=True
+    )
+    supply_low = fields.Decimal(load_default=None, allow_none=True)
+    supply_high = fields.Decimal(load_default=None, allow_none=True)
+    invalidation_level = fields.Decimal(required=True)
+    rationale = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    effective_at = fields.DateTime(required=True)
+    change_reason = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=2000)
+    )
+
+
+class ForecastLineCreateSchema(_StrictRequestSchema):
+    fiscal_year = fields.Int(
+        required=True, validate=validate.Range(min=1000, max=9999)
+    )
+    is_estimate = fields.Boolean(required=True)
+    revenue = fields.Decimal(load_default=None, allow_none=True)
+    ebitda = fields.Decimal(load_default=None, allow_none=True)
+    pat = fields.Decimal(load_default=None, allow_none=True)
+    ebitda_margin_pct = fields.Decimal(load_default=None, allow_none=True)
+    eps = fields.Decimal(load_default=None, allow_none=True)
+    currency = fields.Str(
+        load_default="INR", validate=validate.Length(max=3)
+    )
+    unit = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            ("ABSOLUTE", "THOUSAND", "LAKH", "CRORE", "MILLION")
+        ),
+    )
+
+
+class ForecastRevisionCreateSchema(_StrictRequestSchema):
+    base_revision_id = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=36)
+    )
+    as_of_date = fields.Date(required=True)
+    assumptions = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    change_reason = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=2000)
+    )
+    lines = fields.List(
+        fields.Nested(ForecastLineCreateSchema),
+        load_default=list,
+    )
+
+
+class ValuationReferenceLineCreateSchema(_StrictRequestSchema):
+    reference_forecast_revision_id = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=36)
+    )
+    reference_fiscal_year = fields.Int(
+        load_default=None, allow_none=True
+    )
+    reference_metric = fields.Str(
+        required=True, validate=validate.Length(max=64)
+    )
+    reference_metric_value = fields.Decimal(required=True)
+    reference_metric_unit = fields.Str(
+        required=True, validate=validate.Length(max=64)
+    )
+    reference_metric_basis = fields.Str(
+        required=True, validate=validate.Length(max=4000)
+    )
+    sort_order = fields.Int(
+        required=True, validate=validate.Range(min=0)
+    )
+
+
+class ValuationRevisionCreateSchema(_StrictRequestSchema):
+    base_revision_id = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=36)
+    )
+    valuation_method = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            (
+                ValuationMethod.PE,
+                ValuationMethod.EV_EBITDA,
+                ValuationMethod.PB,
+                ValuationMethod.NAV,
+                ValuationMethod.SOTP,
+                ValuationMethod.ASSET_VALUE,
+                ValuationMethod.UNIT_BASED,
+                ValuationMethod.OTHER,
+            )
+        ),
+    )
+    justified_multiple = fields.Decimal(load_default=None, allow_none=True)
+    implied_enterprise_value = fields.Decimal(
+        load_default=None, allow_none=True
+    )
+    net_debt = fields.Decimal(load_default=None, allow_none=True)
+    other_equity_adjustment = fields.Decimal(
+        load_default=None, allow_none=True
+    )
+    implied_future_equity_value = fields.Decimal(
+        load_default=None, allow_none=True
+    )
+    required_return_pct = fields.Decimal(load_default=None, allow_none=True)
+    discount_period_years = fields.Decimal(
+        load_default=None, allow_none=True
+    )
+    present_value = fields.Decimal(load_default=None, allow_none=True)
+    current_market_cap = fields.Decimal(load_default=None, allow_none=True)
+    currency = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=3)
+    )
+    unit = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=20)
+    )
+    valuation_notes = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=4000)
+    )
+    as_of_date = fields.Date(required=True)
+    change_reason = fields.Str(
+        load_default=None, allow_none=True, validate=validate.Length(max=2000)
+    )
+    reference_lines = fields.List(
+        fields.Nested(ValuationReferenceLineCreateSchema),
+        load_default=list,
+    )
+
+
+class ResearchPointResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    kind = fields.Str(dump_only=True)
+    title = fields.Str(dump_only=True)
+    detail = fields.Str(dump_only=True, allow_none=True)
+    status = fields.Str(dump_only=True, allow_none=True)
+    target_date = fields.Date(dump_only=True, allow_none=True)
+    sort_order = fields.Int(dump_only=True)
+
+
+class ResearchRevisionResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    company_id = fields.Str(dump_only=True)
+    revision_number = fields.Int(dump_only=True)
+    supersedes_revision_id = fields.Str(dump_only=True, allow_none=True)
+    why_selected = fields.Str(dump_only=True)
+    what_is_changing = fields.Str(dump_only=True, allow_none=True)
+    business_journey = fields.Str(dump_only=True, allow_none=True)
+    thesis = fields.Str(dump_only=True)
+    thesis_invalidation = fields.Str(dump_only=True)
+    management_summary = fields.Str(dump_only=True, allow_none=True)
+    management_quality = fields.Str(dump_only=True)
+    management_rationale = fields.Str(dump_only=True, allow_none=True)
+    management_evidence = fields.Str(dump_only=True, allow_none=True)
+    governance_status = fields.Str(dump_only=True)
+    change_reason = fields.Str(dump_only=True, allow_none=True)
+    effective_at = _UtcDateTime(dump_only=True)
+    created_at = _UtcDateTime(dump_only=True)
+    points = fields.List(
+        fields.Nested(ResearchPointResponseSchema), dump_only=True
+    )
+
+
+class MarketPlanRevisionResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    company_id = fields.Str(dump_only=True)
+    revision_number = fields.Int(dump_only=True)
+    supersedes_revision_id = fields.Str(dump_only=True, allow_none=True)
+    currency = fields.Str(dump_only=True)
+    accumulation_low = fields.Decimal(as_string=True, dump_only=True)
+    accumulation_high = fields.Decimal(as_string=True, dump_only=True)
+    preferred_accumulation_price = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    supply_low = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    supply_high = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    invalidation_level = fields.Decimal(as_string=True, dump_only=True)
+    rationale = fields.Str(dump_only=True, allow_none=True)
+    effective_at = _UtcDateTime(dump_only=True)
+    change_reason = fields.Str(dump_only=True, allow_none=True)
+    created_at = _UtcDateTime(dump_only=True)
+
+
+class ForecastLineResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    fiscal_year = fields.Int(dump_only=True)
+    is_estimate = fields.Boolean(dump_only=True)
+    revenue = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    ebitda = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    pat = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    ebitda_margin_pct = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    eps = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    currency = fields.Str(dump_only=True)
+    unit = fields.Str(dump_only=True)
+
+
+class ForecastRevisionResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    company_id = fields.Str(dump_only=True)
+    revision_number = fields.Int(dump_only=True)
+    supersedes_revision_id = fields.Str(dump_only=True, allow_none=True)
+    as_of_date = fields.Date(dump_only=True)
+    assumptions = fields.Str(dump_only=True, allow_none=True)
+    change_reason = fields.Str(dump_only=True, allow_none=True)
+    created_at = _UtcDateTime(dump_only=True)
+    lines = fields.List(
+        fields.Nested(ForecastLineResponseSchema), dump_only=True
+    )
+
+
+class ValuationReferenceLineResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    reference_forecast_revision_id = fields.Str(
+        dump_only=True, allow_none=True
+    )
+    reference_fiscal_year = fields.Int(dump_only=True, allow_none=True)
+    reference_metric = fields.Str(dump_only=True)
+    reference_metric_value = fields.Decimal(
+        as_string=True, dump_only=True
+    )
+    reference_metric_unit = fields.Str(dump_only=True)
+    reference_metric_basis = fields.Str(dump_only=True)
+    sort_order = fields.Int(dump_only=True)
+
+
+class ValuationRevisionResponseSchema(Schema):
+    id = fields.Str(dump_only=True)
+    company_id = fields.Str(dump_only=True)
+    valuation_method = fields.Str(dump_only=True)
+    revision_number = fields.Int(dump_only=True)
+    supersedes_revision_id = fields.Str(dump_only=True, allow_none=True)
+    justified_multiple = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    implied_enterprise_value = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    net_debt = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    other_equity_adjustment = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    implied_future_equity_value = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    required_return_pct = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    discount_period_years = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    present_value = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    current_market_cap = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    currency = fields.Str(dump_only=True, allow_none=True)
+    unit = fields.Str(dump_only=True, allow_none=True)
+    valuation_notes = fields.Str(dump_only=True, allow_none=True)
+    as_of_date = fields.Date(dump_only=True)
+    change_reason = fields.Str(dump_only=True, allow_none=True)
+    created_at = _UtcDateTime(dump_only=True)
+    reference_lines = fields.List(
+        fields.Nested(ValuationReferenceLineResponseSchema), dump_only=True
+    )
+
+
 __all__ = [
     "CompanyCreateSchema",
     "CompanyPatchSchema",
@@ -410,13 +789,27 @@ __all__ = [
     "DisclosureResponseSchema",
     "EntitlementPutSchema",
     "EntitlementResponseSchema",
+    "ForecastLineCreateSchema",
+    "ForecastLineResponseSchema",
+    "ForecastRevisionCreateSchema",
+    "ForecastRevisionResponseSchema",
     "GovernanceFlagCreateSchema",
     "GovernanceFlagPatchSchema",
     "GovernanceFlagResponseSchema",
     "InstitutionCreateSchema",
     "InstitutionPatchSchema",
     "InstitutionResponseSchema",
+    "MarketPlanRevisionCreateSchema",
+    "MarketPlanRevisionResponseSchema",
     "OwnershipSnapshotCreateSchema",
     "OwnershipSnapshotResponseSchema",
+    "ResearchPointCreateSchema",
+    "ResearchPointResponseSchema",
+    "ResearchRevisionCreateSchema",
+    "ResearchRevisionResponseSchema",
+    "ValuationReferenceLineCreateSchema",
+    "ValuationReferenceLineResponseSchema",
+    "ValuationRevisionCreateSchema",
+    "ValuationRevisionResponseSchema",
     "load_admin_payload",
 ]
