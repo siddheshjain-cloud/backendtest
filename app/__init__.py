@@ -40,6 +40,10 @@ def create_app(config_class=Config):
     from app.routes.tickers import tickers_bp
     from app.routes.tags import tags_bp
     from app.routes.telegram import telegram_bp
+    from app.routes.research import research_bp
+    from app.routes.documents import documents_bp
+    from app.routes.admin_research import admin_research_bp, admin_entitlements_bp
+    from app.routes.admin_documents import admin_documents_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(users_bp, url_prefix='/api/users')
@@ -47,6 +51,11 @@ def create_app(config_class=Config):
     app.register_blueprint(tickers_bp, url_prefix='/api/tickers')
     app.register_blueprint(tags_bp, url_prefix='/api/tags')
     app.register_blueprint(telegram_bp, url_prefix='/api/telegram')
+    app.register_blueprint(research_bp, url_prefix='/api/research')
+    app.register_blueprint(documents_bp, url_prefix='/api/research')
+    app.register_blueprint(admin_research_bp, url_prefix='/api/admin/research')
+    app.register_blueprint(admin_documents_bp, url_prefix='/api/admin/research')
+    app.register_blueprint(admin_entitlements_bp, url_prefix='/api/admin/users')
 
     # Error handlers
     from app.utils.error_handlers import register_error_handlers
