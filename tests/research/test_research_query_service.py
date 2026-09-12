@@ -305,8 +305,14 @@ def _company_payload(company: Company) -> dict[str, object]:
     }
 
 
+def _fresh_quote_time() -> datetime:
+    """Execution-relative timestamp inside the production freshness window."""
+
+    return datetime.now(timezone.utc)
+
+
 def _quote(ticker: Ticker) -> dict[str, object]:
-    return MarketPriceService.project(ticker, now=FIXED_NOW)
+    return MarketPriceService.project(ticker, now=_fresh_quote_time())
 
 
 @pytest.fixture
@@ -331,7 +337,7 @@ def company_factory(app, ticker_factory):
             name=ticker_name,
             last_price=123.45,
         )
-        ticker.last_updated = FIXED_NOW
+        ticker.last_updated = _fresh_quote_time()
         db.session.flush()
         company = Company(
             ticker_id=ticker.id,
@@ -381,7 +387,7 @@ def seeded_company(app, company_factory):
         isin="INE0LOJ01019",
         instrument_token=1001,
     )
-    company.ticker.last_updated = FIXED_NOW
+    company.ticker.last_updated = _fresh_quote_time()
     db.session.flush()
     return company
 
