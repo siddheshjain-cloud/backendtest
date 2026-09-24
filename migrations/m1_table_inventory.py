@@ -12,8 +12,11 @@ when the plan was written: the later content-addressed storage refactor
 introduced them, and this migration's own legacy-column migration step
 (``_migrate_legacy_document_fields``) requires both to exist so it can move
 ``document.content_hash_sha256`` / ``storage_provider`` / ``storage_key`` data
-into them before dropping the legacy columns. They are included here as a
-documented, necessary extension of the frozen set, not an unscoped expansion.
+into them before dropping the legacy columns. They are included here as an
+explicit, approved superseding change to the frozen 18-table list -- the
+Plan 4 content-addressed storage refactor they belong to was already
+implemented and independently reviewed before Plan 5 Task 1's migration was
+written -- not accidental scope drift.
 """
 
 from __future__ import annotations

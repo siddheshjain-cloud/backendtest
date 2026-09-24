@@ -11,6 +11,15 @@ The document content-addressable transition is performed before the legacy
 document-owned storage columns are removed. If a row still holds provider/key
 data without a usable content identity, the migration fails closed rather than
 silently dropping provenance.
+
+Plan 5 Task 1 froze an 18-table set for this revision. The Plan 4 content-
+addressed document storage refactor (already implemented and independently
+reviewed) added ``document_content`` and ``document_storage_location`` after
+that plan text was written; this migration must create both for its own
+legacy-column migration step above to work. This is treated as an approved
+superseding change to the frozen 18-table list, not scope drift -- see
+``migrations/m1_table_inventory.py`` for the authoritative 20-table set both
+this revision and its tests are pinned to.
 """
 
 from __future__ import annotations
