@@ -300,7 +300,10 @@ def _document_visibility_predicate(
                     )
                 ),
             ),
-            Document.provided_by_user_id == context.user_id,
+            sa.and_(
+                Document.provided_by_user_id.isnot(None),
+                Document.provided_by_user_id == context.user_id,
+            ),
         ),
     )
 
@@ -993,11 +996,16 @@ class DocumentLibraryService:
 
         document = db.session.scalar(
             sa.select(Document)
-            .where(Document.id == document_id)
+            .where(
+                Document.id == document_id,
+                _document_visibility_predicate(context),
+            )
             .options(
                 selectinload(Document.institutional_metadata).selectinload(
                     InstitutionalReportMetadata.institution
-                )
+                ),
+                selectinload(Document.content),
+                selectinload(Document.supersedes),
             )
         )
         if document is None:
@@ -1044,7 +1052,9 @@ class DocumentLibraryService:
             statement.options(
                 selectinload(Document.institutional_metadata).selectinload(
                     InstitutionalReportMetadata.institution
-                )
+                ),
+                selectinload(Document.content),
+                selectinload(Document.supersedes),
             )
             .order_by(*_document_order_by())
             .offset((page - 1) * per_page)
@@ -1123,7 +1133,9 @@ class DocumentLibraryService:
             statement.options(
                 selectinload(Document.institutional_metadata).selectinload(
                     InstitutionalReportMetadata.institution
-                )
+                ),
+                selectinload(Document.content),
+                selectinload(Document.supersedes),
             )
             .order_by(*_document_order_by())
             .offset((page - 1) * per_page)

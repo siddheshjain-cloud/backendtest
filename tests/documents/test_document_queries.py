@@ -13,6 +13,7 @@ import hashlib
 from datetime import date, datetime, timezone
 
 import pytest
+from sqlalchemy import event
 
 from app import db
 from app.models import (
@@ -720,6 +721,48 @@ def test_list_company_documents_filters_rights_before_counts_and_pagination(
         _assert_storage_absent(item)
 
 
+def test_anonymous_context_never_counts_a_providerless_restricted_document(
+    app, admin_user, company
+):
+    """The SQL visibility predicate must fail closed on a null caller.
+
+    ``Document.provided_by_user_id == context.user_id`` compiles to an
+    ``IS NULL`` comparison when ``context.user_id`` is ``None``, which would
+    wrongly match a restricted document with no assigned provider. The
+    policy layer (``_is_provider``) already requires
+    ``provided_by_user_id is not None`` in Python; the SQL predicate must be
+    equivalent so a restricted, providerless document never enters totals or
+    pagination for an unauthenticated/anonymous caller -- previously this
+    produced total_items=1 with zero items actually returned.
+    """
+
+    base_time = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+    _make_document(
+        identifier="90000000-0000-0000-0000-000000000001",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="PROVIDERLESS-RESTRICTED-DOCUMENT",
+        created_at=base_time,
+        document_date=date(2026, 9, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=None,
+    )
+
+    anonymous_context = ResearchAccessContext(None, False, ResearchTier.FREE)
+    result = DocumentLibraryService.list_company_documents(
+        company.id,
+        {},
+        1,
+        20,
+        anonymous_context,
+    )
+
+    assert result.total_items == 0
+    assert result.items == []
+
+
 def test_list_institutional_reports_latest_preserves_paginated_history(
     app, admin_user, premium_user, company, other_company
 ):
@@ -1235,3 +1278,72 @@ def test_institutional_history_remains_paginated_while_latest_is_one_per_institu
     assert DocumentLibraryService.get_document(
         alpha_oldest.id, context
     )["title"] == "Alpha oldest"
+
+
+def test_list_company_documents_avoids_per_row_lazy_loads(
+    app, admin_user, user_factory, company
+):
+    """A page of documents needing content/supersedes must not issue a
+    lazy query per row (P4T8-REVIEW finding #2). ``content_hash_sha256``
+    lazily loads ``Document.content`` and a set ``supersedes_document_id``
+    lazily loads ``Document.supersedes`` unless both are preloaded via
+    ``selectinload`` -- previously a five-item page issued nine statements
+    including five separate per-row content queries.
+    """
+    provider = user_factory(email="efficiency-provider@example.com")
+    context = _context(provider.id)
+    base_time = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+
+    predecessor = _make_document(
+        identifier="efficiency-predecessor",
+        created_by_user_id=admin_user.id,
+        company=company,
+        title="EFFICIENCY-PREDECESSOR",
+        created_at=base_time,
+        document_date=date(2026, 1, 1),
+        source_access=SourceAccess.RESTRICTED,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        original_source_url=None,
+        provided_by_user_id=provider.id,
+        content_hash_sha256="e" * 64,
+    )
+    for index in range(5):
+        _make_document(
+            identifier=f"efficiency-doc-{index}",
+            created_by_user_id=admin_user.id,
+            company=company,
+            title=f"EFFICIENCY-DOCUMENT-{index}",
+            created_at=base_time,
+            document_date=date(2026, 2 + index, 1),
+            source_access=SourceAccess.RESTRICTED,
+            distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+            original_source_url=None,
+            provided_by_user_id=provider.id,
+            content_hash_sha256=f"{index}" * 64,
+            supersedes_document_id=predecessor.id,
+        )
+    db.session.commit()
+
+    statement_count = 0
+
+    def _count_statements(*_args, **_kwargs):
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(db.engine, "before_cursor_execute", _count_statements)
+    try:
+        result = DocumentLibraryService.list_company_documents(
+            company.id, {}, 1, 20, context
+        )
+    finally:
+        event.remove(db.engine, "before_cursor_execute", _count_statements)
+
+    assert len(result.items) == 6
+    # Fixed cost regardless of row count: company-exists check, count
+    # query, main select, plus one batched selectinload query per eager-
+    # loaded relationship (institutional_metadata, its institution,
+    # content, supersedes) -- never one query per document row.
+    assert statement_count <= 8, (
+        f"expected a bounded, row-count-independent statement count, "
+        f"got {statement_count} for 6 rows"
+    )
