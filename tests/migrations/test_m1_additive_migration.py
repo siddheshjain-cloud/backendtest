@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from app import db
 import app.models  # noqa: F401 - registers the current M1 metadata
 from app.models.document import Document
+from migrations.m1_table_inventory import M1_TABLES
 from scripts.inspect_database_schema import inspect_schema
 from tests.migrations.helpers import (
     LEGACY_TABLES,
@@ -20,29 +21,6 @@ from tests.migrations.helpers import (
     upgrade_database,
 )
 
-
-M1_TABLES = {
-    "business_group",
-    "company",
-    "company_disclosure",
-    "document",
-    "document_audit_event",
-    "document_company_link",
-    "document_content",
-    "document_storage_location",
-    "forecast_line",
-    "forecast_revision",
-    "governance_flag",
-    "institution",
-    "institutional_report_metadata",
-    "market_plan_revision",
-    "ownership_snapshot",
-    "research_point",
-    "research_revision",
-    "user_entitlement",
-    "valuation_reference_line",
-    "valuation_revision",
-}
 
 M1_HEAD = "20260904_02"
 

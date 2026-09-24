@@ -24,6 +24,7 @@ from alembic.util.exc import CommandError
 
 from app import db
 import app.models  # noqa: F401 - registers the current M1 metadata
+from migrations.m1_table_inventory import M1_TABLES
 
 
 revision: str = "20260904_02"
@@ -237,11 +238,18 @@ def _drop_legacy_document_columns(bind, legacy_present) -> None:
 def upgrade() -> None:
     bind = op.get_bind()
 
-    # Create every missing current M1 table in dependency order. On a fresh
-    # baseline this creates all M1 tables, including the content-addressed
-    # document tables. On an intermediate database it only fills in tables
-    # that do not already exist, so existing M1 work is preserved.
-    db.metadata.create_all(bind=bind)
+    # Create exactly the frozen M1_TABLES set, in dependency order, rather
+    # than every table SQLAlchemy happens to know about -- this migration
+    # must not silently absorb unrelated tables added to app.models after
+    # this revision was written. On a fresh baseline this creates all M1
+    # tables, including the content-addressed document tables. On an
+    # intermediate database ``checkfirst`` skips tables that already exist,
+    # so existing M1 work is preserved.
+    db.metadata.create_all(
+        bind=bind,
+        tables=[db.metadata.tables[name] for name in sorted(M1_TABLES)],
+        checkfirst=True,
+    )
 
     if "document" not in set(sa.inspect(bind).get_table_names()):
         raise CommandError("Migration could not locate the document table")
@@ -267,10 +275,13 @@ def downgrade() -> None:
     # Reverse SQLAlchemy's dependency-sorted order so child tables drop before
     # their parents. SQLite is the supported test/development dialect and does
     # not enforce the foreign-key constraints during this additive rollback.
+    # Drop exactly the frozen M1_TABLES set this revision is responsible for,
+    # not every non-legacy table -- an exclusion filter would also drop any
+    # unrelated table added to app.models after this revision was written.
     m1_tables = [
         table
         for table in reversed(db.metadata.sorted_tables)
-        if table.name not in LEGACY_TABLES
+        if table.name in M1_TABLES
     ]
 
     for table in m1_tables:

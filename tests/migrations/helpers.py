@@ -145,3 +145,54 @@ def assert_m1_schema_invariants(tables: dict[str, dict]) -> None:
     }
     assert (("document_id",), "document") in audit_foreign_keys
     assert (("actor_user_id",), "user") in audit_foreign_keys
+
+
+# SQLAlchemy's generic Inspector.get_indexes() does not reflect partial/
+# filtered index WHERE predicates on any dialect, so assert_m1_schema_invariants
+# above cannot tell a correctly filtered unique index from an accidentally
+# unconditional one -- both report as {"unique": True, "columns": [...]}. Read
+# the predicate directly from sqlite_master for the three M1 indexes whose
+# uniqueness is only correct because it is filtered.
+_PARTIAL_UNIQUE_INDEXES = (
+    "uq_document_metadata_fingerprint_ordinary",
+    "uq_document_metadata_fingerprint_successor",
+    "uq_document_company_link_primary",
+)
+
+
+def assert_m1_partial_index_predicates(database_url: str) -> None:
+    """Assert the M1 filtered unique indexes still carry a WHERE predicate.
+
+    Without this, dropping the predicate (making the index unconditionally
+    unique) would pass ``assert_m1_schema_invariants`` unnoticed, since that
+    check only verifies uniqueness and columns, not the filter.
+    """
+
+    engine = sa.create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                sa.text(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'index' AND name IN "
+                    "(:i1, :i2, :i3)"
+                ),
+                {
+                    "i1": _PARTIAL_UNIQUE_INDEXES[0],
+                    "i2": _PARTIAL_UNIQUE_INDEXES[1],
+                    "i3": _PARTIAL_UNIQUE_INDEXES[2],
+                },
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+    index_sql = dict(rows)
+    missing = set(_PARTIAL_UNIQUE_INDEXES) - set(index_sql)
+    if missing:
+        raise AssertionError(f"Missing partial unique indexes: {sorted(missing)}")
+
+    for name in _PARTIAL_UNIQUE_INDEXES:
+        sql = index_sql[name] or ""
+        assert "WHERE" in sql.upper(), (
+            f"{name} is not a filtered/partial index (no WHERE predicate): {sql!r}"
+        )

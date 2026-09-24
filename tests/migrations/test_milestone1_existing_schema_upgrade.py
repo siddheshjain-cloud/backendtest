@@ -7,11 +7,11 @@ and the complete Milestone 1 table set now exists.
 
 from __future__ import annotations
 
-from app import db
-import app.models  # noqa: F401 - registers the current Milestone 1 metadata
+from migrations.m1_table_inventory import M1_TABLES
 from scripts.inspect_database_schema import inspect_schema
 from tests.migrations.helpers import (
     LEGACY_TABLES,
+    assert_m1_partial_index_predicates,
     assert_m1_schema_invariants,
     create_legacy_schema_copy,
     schema_snapshot,
@@ -48,9 +48,9 @@ def test_existing_schema_copy_upgrades_additively_without_legacy_changes(tmp_pat
         "versions": [M1_HEAD],
     }
     assert schema_snapshot(url, LEGACY_TABLES) == legacy_snapshot
-    assert set(after_inventory["tables"]) == set(db.metadata.tables) | {
+    assert set(after_inventory["tables"]) == M1_TABLES | LEGACY_TABLES | {
         "alembic_version"
     }
-    assert LEGACY_TABLES <= set(after_inventory["tables"])
 
     assert_m1_schema_invariants(after_inventory["tables"])
+    assert_m1_partial_index_predicates(url)
