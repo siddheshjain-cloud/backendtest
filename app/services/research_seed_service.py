@@ -5,12 +5,29 @@ It does not fabricate binary document content, does not append duplicate
 revision streams, and preserves any pre-existing matching rows instead of
 overwriting them. Revisioned aggregates are created only when their stream is
 absent for the IKIO company.
+
+``ResearchSeedService.run()`` is the original, already-tested internal
+builder: it self-bootstraps a complete reference graph from nothing (creating
+the IKIO ticker/admin/demo users if absent), which is exactly what a fresh
+test/demo database needs and is relied on by the existing test suite.
+
+``seed_ikio()`` is a separate, stricter entrypoint for real operational use
+(the Plan 5 Task 7 CLI). It adds the preconditions a one-off internal builder
+correctly does not need: the IKIO ticker must already exist for real (no
+market data is fabricated), the caller must supply a real, validated admin
+actor, the payload's declared ``seed_version`` must match, and a dry run must
+be able to prove all of that without writing anything. It wraps ``run()``
+rather than changing it, and additionally ensures the one specific,
+NSE-sourced ``QUARTERLY_RESULTS`` document Task 7 requires.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import sqlalchemy as sa
 
@@ -52,6 +69,11 @@ from app.models.research_types import (
 from app.models.entitlement import INVESTMENT_RESEARCH_PRODUCT_CODE
 from app.services.document_library_service import DocumentLibraryService
 from app.services.research_command_service import ResearchCommandService
+from app.utils.research_errors import (
+    ResearchForbiddenError,
+    ResearchNotFoundError,
+    ResearchValidationError,
+)
 
 
 UTC = timezone.utc
@@ -78,6 +100,21 @@ DISCLOSURE_SOURCE_URL = "https://exchange.example/ref/key"
 SEED_ADMIN_EMAIL = "ikio-seed-admin@example.com"
 SEED_PREMIUM_EMAIL = "ikio-seed-premium@example.com"
 SEED_PROVIDER_EMAIL = "ikio-seed-provider@example.com"
+
+# seed_ikio()-only: the Task 7 CLI entrypoint's stricter, source-verified
+# contract. Not used by ResearchSeedService.run() itself.
+SEED_VERSION = "ios-m1-ikio-v1"
+
+IKIO_QUARTERLY_RESULTS_TITLE = (
+    "IKIO Technologies Limited — Q1 FY27 Integrated Filing"
+)
+IKIO_QUARTERLY_RESULTS_DATE = date(2026, 8, 8)
+IKIO_QUARTERLY_RESULTS_PERIOD = "Q1_FY27"
+IKIO_QUARTERLY_RESULTS_PUBLISHER = "National Stock Exchange of India Limited"
+IKIO_QUARTERLY_RESULTS_URL = (
+    "https://nsearchives.nseindia.com/corporate/ixbrl/"
+    "INTEGRATED_FILING_INDAS_184272_08082026200616_iXBRL_WEB.html"
+)
 
 
 class ResearchSeedService:
@@ -739,3 +776,108 @@ class ResearchSeedService:
                 "document_id": None,
             },
         )
+
+
+# ----------------------------------------------------------------------
+# Plan 5 Task 7 CLI entrypoint: seed_ikio()
+# ----------------------------------------------------------------------
+
+
+def _quarterly_results_document_payload() -> dict:
+    return {
+        "document": {
+            "document_type": DocumentType.QUARTERLY_RESULTS,
+            "title": IKIO_QUARTERLY_RESULTS_TITLE,
+            "document_date": IKIO_QUARTERLY_RESULTS_DATE.isoformat(),
+            "reporting_period": IKIO_QUARTERLY_RESULTS_PERIOD,
+            "publisher_name": IKIO_QUARTERLY_RESULTS_PUBLISHER,
+            "original_source_url": IKIO_QUARTERLY_RESULTS_URL,
+            "discovery_source_type": DiscoverySourceType.OFFICIAL_SITE,
+            "source_access": SourceAccess.PUBLIC,
+            "acquisition_method": AcquisitionMethod.MANUAL_REFERENCE,
+            "distribution_status": DistributionStatus.LINK_ONLY,
+            "ingestion_status": IngestionStatus.DISCOVERED,
+        }
+    }
+
+
+@dataclass(frozen=True)
+class SeedOutcome:
+    """What ``seed_ikio`` did or would do."""
+
+    company_id: str | None
+    quarterly_results_document_id: str | None
+    dry_run: bool
+
+
+def seed_ikio(
+    payload_path: Path,
+    actor_user_id: str,
+    *,
+    dry_run: bool = False,
+) -> SeedOutcome:
+    """Plan 5 Task 7's real-operation entrypoint.
+
+    Unlike ``ResearchSeedService.run()`` (which self-bootstraps a demo/test
+    reference graph, including the ticker, from nothing), this enforces the
+    real-operation preconditions Task 7 specifies: the IKIO ticker must
+    already exist (no market data is ever fabricated here), the caller must
+    supply a real admin actor, and the payload's declared version must
+    match. A dry run proves all of that without writing anything.
+    """
+
+    try:
+        raw_payload = json.loads(Path(payload_path).read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ResearchValidationError(
+            {"payload_path": [f"Could not read or parse payload: {error}"]}
+        ) from None
+
+    declared_version = raw_payload.get("seed_version")
+    if declared_version != SEED_VERSION:
+        raise ResearchValidationError(
+            {
+                "seed_version": [
+                    f"Expected {SEED_VERSION!r}, got {declared_version!r}"
+                ]
+            }
+        )
+
+    actor = db.session.get(User, actor_user_id)
+    if actor is None or not actor.is_admin:
+        raise ResearchForbiddenError(
+            "seed_actor_not_admin",
+            "The IKIO seed may only be run by an existing administrator.",
+        )
+
+    ticker = db.session.scalar(
+        sa.select(Ticker).where(Ticker.symbol == IKIO_SYMBOL)
+    )
+    if ticker is None:
+        raise ResearchNotFoundError(
+            "ikio_ticker_not_found",
+            "The IKIO ticker must already exist; the seed never creates "
+            "market data.",
+        )
+
+    if dry_run:
+        return SeedOutcome(
+            company_id=None,
+            quarterly_results_document_id=None,
+            dry_run=True,
+        )
+
+    result = ResearchSeedService.run()
+    company_id = result["company_id"]
+
+    document = ResearchSeedService._ensure_document(
+        company_id,
+        actor_user_id,
+        _quarterly_results_document_payload(),
+    )
+
+    return SeedOutcome(
+        company_id=company_id,
+        quarterly_results_document_id=document.id,
+        dry_run=False,
+    )

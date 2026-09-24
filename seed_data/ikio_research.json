@@ -1,0 +1,6 @@
+{
+  "seed_version": "ios-m1-ikio-v1",
+  "ticker_symbol": "IKIO",
+  "isin": "INE0LOJ01019",
+  "note": "The full IKIO reference graph is built by ResearchSeedService.run(); this payload declares the version this CLI run expects and the identity it targets, per Plan 5 Task 7."
+}
