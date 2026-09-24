@@ -9,6 +9,7 @@ immutable revision history with section and valuation-method validation.
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -18,6 +19,7 @@ from app import db
 from app.models import (
     Company,
     CompanyDisclosure,
+    Document,
     ForecastLine,
     ForecastRevision,
     MarketPlanRevision,
@@ -25,6 +27,14 @@ from app.models import (
     ResearchRevision,
     ValuationReferenceLine,
     ValuationRevision,
+)
+from app.models.document import (
+    AcquisitionMethod,
+    DiscoverySourceType,
+    DistributionStatus,
+    DocumentType,
+    IngestionStatus,
+    SourceAccess,
 )
 from app.models.research_types import (
     GovernanceStatus,
@@ -98,6 +108,7 @@ def _disclosure(
     is_key: bool = False,
     significance_note: str | None = None,
     archived_at: datetime | None = None,
+    document_id: str | None = None,
 ) -> CompanyDisclosure:
     row = CompanyDisclosure(
         id=disclosure_id,
@@ -111,7 +122,7 @@ def _disclosure(
         exchange_reference="BSE:REFERENCE",
         significance_note=significance_note,
         is_key=is_key,
-        document_id=None,
+        document_id=document_id,
         created_by_user_id=actor_user_id,
         created_at=created_at,
         archived_at=archived_at,
@@ -119,6 +130,28 @@ def _disclosure(
     db.session.add(row)
     db.session.flush()
     return row
+
+
+def _restricted_document(
+    created_by_user_id: str, provided_by_user_id: str
+) -> Document:
+    document = Document(
+        document_type=DocumentType.ANNUAL_REPORT,
+        title="Provider-restricted attachment",
+        document_date=date(2026, 6, 30),
+        reporting_period="FY26",
+        discovery_source_type=DiscoverySourceType.USER,
+        source_access=SourceAccess.RESTRICTED,
+        acquisition_method=AcquisitionMethod.USER_UPLOAD,
+        distribution_status=DistributionStatus.PRIVATE_LIBRARY,
+        ingestion_status=IngestionStatus.DISCOVERED,
+        metadata_fingerprint=uuid.uuid4().hex,
+        provided_by_user_id=provided_by_user_id,
+        created_by_user_id=created_by_user_id,
+    )
+    db.session.add(document)
+    db.session.flush()
+    return document
 
 
 def _seed_key_reg30_disclosures(
@@ -438,6 +471,84 @@ def test_list_disclosures_raises_typed_errors_for_unknown_company_and_filters(
             )
         assert exc_info.value.code == "validation_error"
         assert exc_info.value.details
+
+
+def test_disclosure_document_id_is_hidden_from_callers_without_document_rights(
+    app, company, admin_user, user_factory
+):
+    """P4-FINAL-REVIEW: a disclosure's linked document_id must never be
+    exposed to a caller who is not entitled to see that document.
+
+    ``document_id`` is currently always null through the supported command
+    surface (see ``ResearchCommandService._null_document_id``), but the FK
+    itself allows it once document metadata exists, and the read side had
+    no rights check of its own -- an unrelated free caller could receive a
+    restricted document's real ID. This proves the read-side gate closes
+    that regardless of how the FK gets populated.
+    """
+    provider = user_factory(email="disclosure-document-provider@example.com")
+    document = _restricted_document(
+        created_by_user_id=admin_user.id,
+        provided_by_user_id=provider.id,
+    )
+    _disclosure(
+        company.id,
+        admin_user.id,
+        disclosure_id="linked-1",
+        event_type="REG30",
+        event_date=date(2026, 9, 4),
+        created_at=_utc(4, 4),
+        document_id=document.id,
+    )
+    db.session.commit()
+
+    unrelated_context = ResearchAccessContext(
+        "unrelated-free-caller", False, ResearchTier.FREE
+    )
+    provider_context = ResearchAccessContext(
+        provider.id, False, ResearchTier.FREE
+    )
+
+    unrelated_result = ResearchQueryService.list_disclosures(
+        company.id,
+        event_type=None,
+        is_key=None,
+        date_from=None,
+        date_to=None,
+        newest_first=True,
+        page=1,
+        per_page=10,
+        context=unrelated_context,
+    )
+    assert unrelated_result.total_items == 1
+    assert unrelated_result.items[0]["document_id"] is None
+    assert document.id not in str(unrelated_result.items)
+
+    provider_result = ResearchQueryService.list_disclosures(
+        company.id,
+        event_type=None,
+        is_key=None,
+        date_from=None,
+        date_to=None,
+        newest_first=True,
+        page=1,
+        per_page=10,
+        context=provider_context,
+    )
+    assert provider_result.items[0]["document_id"] == document.id
+
+    admin_result = ResearchQueryService.list_disclosures(
+        company.id,
+        event_type=None,
+        is_key=None,
+        date_from=None,
+        date_to=None,
+        newest_first=True,
+        page=1,
+        per_page=10,
+        context=ADMIN_CONTEXT,
+    )
+    assert admin_result.items[0]["document_id"] == document.id
 
 
 def _research_revision(

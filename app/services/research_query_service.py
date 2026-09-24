@@ -22,6 +22,7 @@ from app import db
 from app.models import (
     Company,
     CompanyDisclosure,
+    Document,
     ForecastLine,
     ForecastRevision,
     GovernanceFlag,
@@ -37,6 +38,7 @@ from app.models.research_types import (
     ResearchPointKind,
     ValuationMethod,
 )
+from app.policies.document_access import DocumentAccessPolicy
 from app.policies.research_access import ResearchAccessPolicy
 from app.services.entitlement_service import ResearchAccessContext
 from app.services.market_price_service import MarketPriceService
@@ -458,11 +460,16 @@ class ResearchQueryService:
         rows = db.session.scalars(statement).all()
         allowed = ResearchAccessPolicy.allowed_sections(context)
         include_significance = "disclosure_significance" in allowed
+        visible_document_ids = _visible_disclosure_document_ids(
+            rows, context
+        )
 
         return PageResult(
             items=[
                 _disclosure_dict(
-                    row, include_significance=include_significance
+                    row,
+                    include_significance=include_significance,
+                    visible_document_ids=visible_document_ids,
                 )
                 for row in rows
             ],
@@ -813,12 +820,49 @@ def _valuation_dict(revision: ValuationRevision) -> dict[str, object]:
     }
 
 
+def _visible_disclosure_document_ids(
+    disclosures: list[CompanyDisclosure],
+    context: ResearchAccessContext,
+) -> set[str]:
+    """Rights-check every document a page of disclosures links to.
+
+    ``CompanyDisclosure.document_id`` is a nullable FK to the Document
+    Library, populated only once document metadata exists (see
+    ``app/models/disclosure.py``). The disclosure row itself carries no
+    rights information of its own, so a linked document's ID must never be
+    exposed to a caller who is not entitled to see that document -- batched
+    here (one query, not one per row) rather than checked inline in
+    ``_disclosure_dict``, matching the existing eager-loading pattern.
+    """
+
+    document_ids = {
+        disclosure.document_id
+        for disclosure in disclosures
+        if disclosure.document_id is not None
+    }
+    if not document_ids:
+        return set()
+    documents = db.session.scalars(
+        sa.select(Document).where(Document.id.in_(document_ids))
+    ).all()
+    return {
+        document.id
+        for document in documents
+        if DocumentAccessPolicy.evaluate(document, context).visible
+    }
+
+
 def _disclosure_dict(
     disclosure: CompanyDisclosure,
     *,
     include_significance: bool,
+    visible_document_ids: set[str],
 ) -> dict[str, object]:
     """Flat, rights-safe disclosure collection item."""
+
+    document_id = disclosure.document_id
+    if document_id is not None and document_id not in visible_document_ids:
+        document_id = None
 
     payload: dict[str, object] = {
         "id": disclosure.id,
@@ -831,7 +875,7 @@ def _disclosure_dict(
         ),
         "exchange_reference": disclosure.exchange_reference,
         "is_key": disclosure.is_key,
-        "document_id": disclosure.document_id,
+        "document_id": document_id,
     }
     if include_significance:
         payload["significance_note"] = disclosure.significance_note
