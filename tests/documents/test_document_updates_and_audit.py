@@ -1172,7 +1172,13 @@ def test_intermediate_same_fingerprint_lineage_remains_editable(
     assert updated.title == "Corrected FY26 Annual Report"
     assert persisted_corrected.metadata_fingerprint != corrected_fingerprint
     assert persisted_corrected.is_fingerprint_duplicate is False
-    assert persisted_reissued.supersedes_document_id == corrected.id
+    # `corrected` vacated the original fingerprint slot. `original` still
+    # legitimately holds it (untouched by this edit), so `reissued` --
+    # `corrected`'s direct successor at that fingerprint -- slots in
+    # directly beneath `original` instead and remains a duplicate; it is
+    # NOT promoted to ordinary, since `original` already owns that slot.
+    # See DocumentLibraryService._direct_successor_using_fingerprint_slot.
+    assert persisted_reissued.supersedes_document_id == original.id
     assert persisted_reissued.metadata_fingerprint == original_fingerprint
     assert persisted_reissued.is_fingerprint_duplicate is True
 
@@ -1244,6 +1250,77 @@ def test_intermediate_lineage_storage_attachment_is_not_an_ordinary_duplicate(
         _create_document(
             admin_user,
             document=unrelated_stored_fields,
+            company_links=[
+                {"company_id": company.id, "is_primary": True}
+            ],
+        )
+
+    assert exc_info.value.code == "document_duplicate"
+
+
+def test_three_document_lineage_survives_sequential_edits_under_stale_lookup(
+    app, admin_user, company, monkeypatch
+):
+    """P4-FINAL-REVIEW: a three-document lineage must keep exactly one row
+    protecting the shared fingerprint through a database constraint, even
+    after both an intermediate and the original document are edited away
+    from it, and even when the app-level duplicate check is stale/bypassed
+    (simulating a concurrent race) rather than genuinely absent.
+    """
+    original = _create_document(
+        admin_user,
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    corrected = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=original.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+    reissued = _create_document(
+        admin_user,
+        document=_document_fields(supersedes_document_id=corrected.id),
+        company_links=[{"company_id": company.id, "is_primary": True}],
+    )
+
+    # Intermediate edit: `corrected` moves off the shared fingerprint.
+    # `reissued` -- its direct successor -- must slot in directly beneath
+    # `original` instead of being left an orphaned, unprotected duplicate.
+    DocumentLibraryService.update_document(
+        document_id=corrected.id,
+        changes={"title": "Corrected FY26 Annual Report"},
+        actor_user_id=admin_user.id,
+        reason="Correct the intermediate title",
+    )
+    after_intermediate_edit = db.session.get(Document, reissued.id)
+    assert after_intermediate_edit.supersedes_document_id == original.id
+    assert after_intermediate_edit.is_fingerprint_duplicate is True
+
+    # Original edit: `original` -- now reissued's direct predecessor --
+    # also moves off the shared fingerprint. `reissued` must be promoted
+    # to ordinary so the fingerprint stays protected by a real unique
+    # index rather than by nothing at all.
+    DocumentLibraryService.update_document(
+        document_id=original.id,
+        changes={"title": "Original report retitled"},
+        actor_user_id=admin_user.id,
+        reason="Correct the original title",
+    )
+    after_original_edit = db.session.get(Document, reissued.id)
+    assert after_original_edit.is_fingerprint_duplicate is False
+
+    def _stale_no_match(**_kwargs: object) -> DuplicateDecision:
+        return DuplicateDecision(kind="NONE", matched_document_id=None)
+
+    monkeypatch.setattr(
+        DocumentDeduplicationService,
+        "find_duplicate",
+        staticmethod(_stale_no_match),
+    )
+
+    with pytest.raises(ResearchConflictError) as exc_info:
+        _create_document(
+            admin_user,
+            document=_document_fields(),
             company_links=[
                 {"company_id": company.id, "is_primary": True}
             ],

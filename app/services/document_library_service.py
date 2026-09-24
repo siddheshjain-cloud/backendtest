@@ -649,11 +649,21 @@ class DocumentLibraryService:
 
             successor = cls._direct_successor_using_fingerprint_slot(document)
             was_fingerprint_duplicate = document.is_fingerprint_duplicate
+            former_predecessor_id = document.supersedes_document_id
             document.metadata_fingerprint = proposed_fingerprint
             document.is_fingerprint_duplicate = False
             db.session.flush([document])
-            if successor is not None and not was_fingerprint_duplicate:
-                successor.is_fingerprint_duplicate = False
+            if successor is not None:
+                if was_fingerprint_duplicate:
+                    # This row was itself a duplicate of an ancestor that
+                    # still legitimately holds the vacated fingerprint (it
+                    # was untouched by this edit), so the successor slots
+                    # in directly beneath that ancestor and stays a
+                    # duplicate -- promoting it to ordinary here would
+                    # collide with that still-live ordinary row.
+                    successor.supersedes_document_id = former_predecessor_id
+                else:
+                    successor.is_fingerprint_duplicate = False
 
             new_link = DocumentCompanyLink(
                 document_id=document_id,
@@ -871,14 +881,24 @@ class DocumentLibraryService:
                     was_fingerprint_duplicate = (
                         document.is_fingerprint_duplicate
                     )
+                    former_predecessor_id = (
+                        document.supersedes_document_id
+                    )
                     document.metadata_fingerprint = proposed_fingerprint
                     document.is_fingerprint_duplicate = False
                     db.session.flush([document])
-                    if (
-                        successor is not None
-                        and not was_fingerprint_duplicate
-                    ):
-                        successor.is_fingerprint_duplicate = False
+                    if successor is not None:
+                        if was_fingerprint_duplicate:
+                            # See the analogous branch in link_company: the
+                            # ancestor that still legitimately holds the
+                            # vacated fingerprint was untouched by this
+                            # edit, so the successor slots in directly
+                            # beneath it and stays a duplicate.
+                            successor.supersedes_document_id = (
+                                former_predecessor_id
+                            )
+                        else:
+                            successor.is_fingerprint_duplicate = False
 
             was_stored = (
                 document.ingestion_status
