@@ -64,7 +64,7 @@ def test_create_app_registers_each_blueprint_with_its_required_prefix(monkeypatc
         return original_register_blueprint(self, blueprint, **options)
 
     monkeypatch.setattr(Flask, "register_blueprint", spying_register_blueprint)
-    create_app(_PrefixProbeConfig)
+    create_app(_PrefixProbeConfig, register_research=True)
 
     registered_prefixes = dict(recorded)
     for name, expected_prefix in EXPECTED_PREFIXES.items():

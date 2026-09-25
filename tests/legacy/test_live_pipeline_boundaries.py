@@ -1,4 +1,6 @@
 import ast
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,8 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "app.policies",
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_live_websocket_has_no_research_document_or_policy_imports():
     source_path = Path(websocket.__file__)
@@ -28,6 +32,42 @@ def test_live_websocket_has_no_research_document_or_policy_imports():
     assert not [
         name for name in imports if name.startswith(FORBIDDEN_IMPORT_PREFIXES)
     ]
+
+
+def test_ticker_manager_construction_does_not_transitively_load_research_document_or_policy_modules():
+    """Direct-import parsing alone cannot see this: ``TickerManager.__init__``
+    calls ``create_app()`` with no arguments (live/websocket.py:55), and until
+    ``create_app()`` gated research/document blueprint registration behind an
+    explicit ``register_research`` flag, that zero-argument call transitively
+    imported every research/document service and policy module into the live
+    ticker process. Probe this in a clean subprocess -- constructing
+    ``TickerManager`` itself would require live Kite/DB connectivity this test
+    must not depend on, but the transitive-import behavior is entirely
+    determined by the same zero-argument ``create_app()`` call it makes, so
+    reproducing that one call is sufficient and safe.
+    """
+
+    probe = (
+        "import sys\n"
+        "from app import create_app\n"
+        "create_app()\n"
+        "loaded = [name for name in sys.modules if name.startswith("
+        f"{FORBIDDEN_IMPORT_PREFIXES!r})]\n"
+        "print(','.join(sorted(loaded)))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    loaded = [name for name in result.stdout.strip().split(",") if name]
+    assert not loaded, (
+        "create_app() with no arguments (what TickerManager.__init__ calls) "
+        f"transitively loaded forbidden modules: {loaded}"
+    )
 
 
 def test_update_ticker_price_only_changes_price_and_timestamp(

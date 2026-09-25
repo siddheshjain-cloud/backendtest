@@ -22,7 +22,7 @@ def _operator_app(database_url: str):
         TESTING = True
         ELASTICSEARCH_URL = None
 
-    return create_app(OperatorConfig)
+    return create_app(OperatorConfig, register_research=True)
 
 
 def _sqlite_url(path) -> str:

@@ -48,7 +48,7 @@ def app(tmp_path):
     TestingConfig.SQLALCHEMY_DATABASE_URI = (
         f"sqlite:///{(tmp_path / f'test-{uuid.uuid4()}.db').as_posix()}"
     )
-    application = create_app(TestingConfig)
+    application = create_app(TestingConfig, register_research=True)
 
     with application.app_context():
         import app.models

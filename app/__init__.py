@@ -13,7 +13,22 @@ migrate = Migrate()
 jwt = JWTManager()
 
 
-def create_app(config_class=Config):
+def create_app(config_class=Config, *, register_research=False):
+    """Build the Flask app.
+
+    ``register_research=False`` (the default) builds the legacy-only app:
+    auth/users/trades/tickers/tags/telegram, with no research or document
+    blueprint registered, so no ``app.services.research``,
+    ``app.services.document``, or ``app.policies`` module is imported. This
+    is the default specifically so that ``live/websocket.py``'s frozen,
+    zero-argument ``create_app()`` call -- used only to give ``TickerManager``
+    a database-bound app context, never to serve research/document HTTP
+    traffic -- never pulls research/document code into the live ticker
+    process. Callers that serve the full API (the WSGI entrypoint, the
+    admin console, and tests that exercise research/document routes) must
+    pass ``register_research=True`` explicitly.
+    """
+
     app = Flask(__name__)
     app.config.from_object(config_class)
 
@@ -33,17 +48,13 @@ def create_app(config_class=Config):
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.close()
 
-    # Register blueprints
+    # Register legacy blueprints -- always, for every caller.
     from app.routes.auth import auth_bp
     from app.routes.users import users_bp
     from app.routes.trades import trades_bp
     from app.routes.tickers import tickers_bp
     from app.routes.tags import tags_bp
     from app.routes.telegram import telegram_bp
-    from app.routes.research import research_bp
-    from app.routes.documents import documents_bp
-    from app.routes.admin_research import admin_research_bp, admin_entitlements_bp
-    from app.routes.admin_documents import admin_documents_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(users_bp, url_prefix='/api/users')
@@ -51,11 +62,19 @@ def create_app(config_class=Config):
     app.register_blueprint(tickers_bp, url_prefix='/api/tickers')
     app.register_blueprint(tags_bp, url_prefix='/api/tags')
     app.register_blueprint(telegram_bp, url_prefix='/api/telegram')
-    app.register_blueprint(research_bp, url_prefix='/api/research')
-    app.register_blueprint(documents_bp, url_prefix='/api/research')
-    app.register_blueprint(admin_research_bp, url_prefix='/api/admin/research')
-    app.register_blueprint(admin_documents_bp, url_prefix='/api/admin/research')
-    app.register_blueprint(admin_entitlements_bp, url_prefix='/api/admin/users')
+
+    # Register research/document blueprints only when explicitly requested.
+    if register_research:
+        from app.routes.research import research_bp
+        from app.routes.documents import documents_bp
+        from app.routes.admin_research import admin_research_bp, admin_entitlements_bp
+        from app.routes.admin_documents import admin_documents_bp
+
+        app.register_blueprint(research_bp, url_prefix='/api/research')
+        app.register_blueprint(documents_bp, url_prefix='/api/research')
+        app.register_blueprint(admin_research_bp, url_prefix='/api/admin/research')
+        app.register_blueprint(admin_documents_bp, url_prefix='/api/admin/research')
+        app.register_blueprint(admin_entitlements_bp, url_prefix='/api/admin/users')
 
     # Error handlers
     from app.utils.error_handlers import register_error_handlers

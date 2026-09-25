@@ -523,7 +523,7 @@ def test_seed_works_after_migration_from_frozen_baseline_to_current_head(tmp_pat
         JWT_SECRET_KEY = "test-jwt-secret"
         ELASTICSEARCH_URL = None
 
-    application = create_app(MigratedTestingConfig)
+    application = create_app(MigratedTestingConfig, register_research=True)
 
     with application.app_context():
         result = ResearchSeedService.run()
