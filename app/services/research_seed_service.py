@@ -11,14 +11,17 @@ builder: it self-bootstraps a complete reference graph from nothing (creating
 the IKIO ticker/admin/demo users if absent), which is exactly what a fresh
 test/demo database needs and is relied on by the existing test suite.
 
-``seed_ikio()`` is a separate, stricter entrypoint for real operational use
-(the Plan 5 Task 7 CLI). It adds the preconditions a one-off internal builder
-correctly does not need: the IKIO ticker must already exist for real (no
-market data is fabricated), the caller must supply a real, validated admin
-actor, the payload's declared ``seed_version`` must match, and a dry run must
-be able to prove all of that without writing anything. It wraps ``run()``
-rather than changing it, and additionally ensures the one specific,
-NSE-sourced ``QUARTERLY_RESULTS`` document Task 7 requires.
+``seed_ikio()`` is a separate, independent entrypoint for real operational
+use (the Plan 5 Task 7 CLI). Task 7 freezes a narrow contract that
+``run()``'s full reference-graph builder does not meet: exactly one Company
+(reusing the caller's existing ticker; no market data is ever fabricated)
+and exactly one ``QUARTERLY_RESULTS`` Document, with every research,
+forecast, valuation, market-plan, ownership, governance, and disclosure
+field left absent. ``seed_ikio()`` therefore does not call ``run()`` --
+it composes ``ResearchCommandService.create_company`` and
+``DocumentLibraryService.create_document`` directly, the same command
+services the admin API itself calls, checking for an existing company and
+an existing document fingerprint first so repeat runs stay idempotent.
 """
 
 from __future__ import annotations
@@ -67,6 +70,9 @@ from app.models.research_types import (
     ValuationMethod,
 )
 from app.models.entitlement import INVESTMENT_RESEARCH_PRODUCT_CODE
+from app.services.document_deduplication_service import (
+    DocumentDeduplicationService,
+)
 from app.services.document_library_service import DocumentLibraryService
 from app.services.research_command_service import ResearchCommandService
 from app.utils.research_errors import (
@@ -104,6 +110,7 @@ SEED_PROVIDER_EMAIL = "ikio-seed-provider@example.com"
 # seed_ikio()-only: the Task 7 CLI entrypoint's stricter, source-verified
 # contract. Not used by ResearchSeedService.run() itself.
 SEED_VERSION = "ios-m1-ikio-v1"
+IKIO_COMPANY_NAME = "IKIO Technologies Limited"
 
 IKIO_QUARTERLY_RESULTS_TITLE = (
     "IKIO Technologies Limited — Q1 FY27 Integrated Filing"
@@ -818,12 +825,17 @@ def seed_ikio(
 ) -> SeedOutcome:
     """Plan 5 Task 7's real-operation entrypoint.
 
-    Unlike ``ResearchSeedService.run()`` (which self-bootstraps a demo/test
-    reference graph, including the ticker, from nothing), this enforces the
-    real-operation preconditions Task 7 specifies: the IKIO ticker must
-    already exist (no market data is ever fabricated here), the caller must
-    supply a real admin actor, and the payload's declared version must
-    match. A dry run proves all of that without writing anything.
+    Creates exactly one Company (reusing the caller's existing ticker; no
+    market data is ever fabricated) and exactly one ``QUARTERLY_RESULTS``
+    Document, via ``ResearchCommandService.create_company`` and
+    ``DocumentLibraryService.create_document`` -- the same command services
+    the admin API itself calls. Every research, forecast, valuation,
+    market-plan, ownership, governance, and disclosure field is left absent,
+    as Task 7 requires; this does not call ``ResearchSeedService.run()``,
+    which builds a much larger reference graph for tests/demos and is not
+    Task 7's approved scope. The caller must supply a real admin actor and
+    the payload's declared version must match. A dry run proves all of that
+    without writing anything.
     """
 
     try:
@@ -867,17 +879,28 @@ def seed_ikio(
             dry_run=True,
         )
 
-    result = ResearchSeedService.run()
-    company_id = result["company_id"]
+    company = db.session.scalar(
+        sa.select(Company).where(Company.ticker_id == ticker.id)
+    )
+    if company is None:
+        company = ResearchCommandService.create_company(
+            {
+                "ticker_id": ticker.id,
+                "legal_name": IKIO_COMPANY_NAME,
+                "display_name": IKIO_COMPANY_NAME,
+                "isin": IKIO_ISIN,
+            },
+            actor_user_id,
+        )
 
     document = ResearchSeedService._ensure_document(
-        company_id,
+        company.id,
         actor_user_id,
         _quarterly_results_document_payload(),
     )
 
     return SeedOutcome(
-        company_id=company_id,
+        company_id=company.id,
         quarterly_results_document_id=document.id,
         dry_run=False,
     )

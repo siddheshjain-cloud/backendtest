@@ -2,5 +2,5 @@
   "seed_version": "ios-m1-ikio-v1",
   "ticker_symbol": "IKIO",
   "isin": "INE0LOJ01019",
-  "note": "The full IKIO reference graph is built by ResearchSeedService.run(); this payload declares the version this CLI run expects and the identity it targets, per Plan 5 Task 7."
+  "note": "seed_ikio() creates exactly one Company and one QUARTERLY_RESULTS Document from this payload's declared version and target identity, per Plan 5 Task 7. It does not call ResearchSeedService.run(), which builds a separate, larger demo/test reference graph."
 }

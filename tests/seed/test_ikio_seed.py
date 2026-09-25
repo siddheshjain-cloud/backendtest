@@ -1,10 +1,15 @@
 """Plan 5 Task 7: real-operation IKIO seed entrypoint (seed_ikio).
 
-ResearchSeedService.run() itself is already covered by
-tests/research/test_p5t7_ikio_seed.py; these tests cover the stricter
-real-operation preconditions specific to seed_ikio: an existing ticker is
-required, the actor must be a real admin, the payload's seed_version must
-match, and a dry run must prove all of that without writing anything.
+seed_ikio() is a narrow, independent entrypoint: it creates exactly one
+Company and one QUARTERLY_RESULTS Document, with no research, forecast,
+valuation, market-plan, ownership, governance, or disclosure data, and no
+CMP. It does not call ResearchSeedService.run() (which builds a much larger
+demo/test reference graph and is covered separately by
+tests/research/test_p5t7_ikio_seed.py) and does not create any user other
+than the supplied actor. These tests cover both the real-operation
+preconditions (an existing ticker is required, the actor must be a real
+admin, the payload's seed_version must match, a dry run must prove all of
+that without writing anything) and the scope boundary itself.
 """
 
 from __future__ import annotations
@@ -15,8 +20,23 @@ import pytest
 import sqlalchemy as sa
 
 from app import db
-from app.models import Company, Document, Ticker, User
+from app.models import (
+    Company,
+    CompanyDisclosure,
+    Document,
+    ForecastRevision,
+    GovernanceFlag,
+    MarketPlanRevision,
+    OwnershipSnapshot,
+    ResearchRevision,
+    Ticker,
+    User,
+    UserEntitlement,
+    ValuationRevision,
+)
 from app.services.research_seed_service import (
+    IKIO_COMPANY_NAME,
+    IKIO_ISIN,
     IKIO_QUARTERLY_RESULTS_DATE,
     IKIO_QUARTERLY_RESULTS_PERIOD,
     IKIO_QUARTERLY_RESULTS_PUBLISHER,
@@ -123,10 +143,11 @@ def test_dry_run_validates_without_writing(
     assert _count(Document) == 0
 
 
-def test_real_run_creates_quarterly_results_document_and_full_graph(
+def test_real_run_creates_exactly_one_company_and_quarterly_results_document(
     app, ticker_factory, admin_user, tmp_path
 ):
-    ticker_factory()
+    ticker = ticker_factory()
+    unchanged_price = ticker.last_price
     payload = _payload_path(tmp_path)
 
     outcome = seed_ikio(payload, admin_user.id)
@@ -135,6 +156,10 @@ def test_real_run_creates_quarterly_results_document_and_full_graph(
     assert outcome.company_id is not None
     company = db.session.get(Company, outcome.company_id)
     assert company is not None
+    assert company.legal_name == IKIO_COMPANY_NAME
+    assert company.display_name == IKIO_COMPANY_NAME
+    assert company.isin == IKIO_ISIN
+    assert company.ticker_id == ticker.id
 
     document = db.session.get(
         Document, outcome.quarterly_results_document_id
@@ -148,6 +173,29 @@ def test_real_run_creates_quarterly_results_document_and_full_graph(
     assert document.reporting_period == IKIO_QUARTERLY_RESULTS_PERIOD
     assert document.publisher_name == IKIO_QUARTERLY_RESULTS_PUBLISHER
     assert document.original_source_url == IKIO_QUARTERLY_RESULTS_URL
+    assert document.created_by_user_id == admin_user.id
+
+    # Exactly one company, one document -- not the full reference graph
+    # ResearchSeedService.run() would build.
+    assert _count(Company) == 1
+    assert _count(Document) == 1
+
+    # CMP is never seeded: the ticker seed_ikio required already existing is
+    # left completely unchanged.
+    db.session.refresh(ticker)
+    assert ticker.last_price == unchanged_price
+
+    # Unknown research/management/governance/ownership/forecast/valuation
+    # fields remain absent, and no user other than the supplied actor exists.
+    assert _count(ResearchRevision) == 0
+    assert _count(ForecastRevision) == 0
+    assert _count(ValuationRevision) == 0
+    assert _count(MarketPlanRevision) == 0
+    assert _count(OwnershipSnapshot) == 0
+    assert _count(GovernanceFlag) == 0
+    assert _count(CompanyDisclosure) == 0
+    assert _count(UserEntitlement) == 0
+    assert _count(User) == 1
 
 
 def test_running_seed_twice_does_not_duplicate_quarterly_results_document(
@@ -159,6 +207,7 @@ def test_running_seed_twice_does_not_duplicate_quarterly_results_document(
     first = seed_ikio(payload, admin_user.id)
     second = seed_ikio(payload, admin_user.id)
 
+    assert first.company_id == second.company_id
     assert first.quarterly_results_document_id == (
         second.quarterly_results_document_id
     )
@@ -168,3 +217,4 @@ def test_running_seed_twice_does_not_duplicate_quarterly_results_document(
         )
     ).all()
     assert len(matches) == 1
+    assert _count(Company) == 1
