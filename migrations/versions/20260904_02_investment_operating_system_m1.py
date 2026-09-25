@@ -16,7 +16,8 @@ Plan 5 Task 1 froze an 18-table set for this revision. The Plan 4 content-
 addressed document storage refactor (already implemented and independently
 reviewed) added ``document_content`` and ``document_storage_location`` after
 that plan text was written; this migration must create both for its own
-legacy-column migration step above to work. This is treated as an approved
+legacy-column migration step above to work. Per the plan's "Approved
+amendment (2026-09-25)" note under Task 1 Step 2, this is a human-authorized
 superseding change to the frozen 18-table list, not scope drift -- see
 ``migrations/m1_table_inventory.py`` for the authoritative 20-table set both
 this revision and its tests are pinned to.
