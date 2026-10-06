@@ -1,15 +1,22 @@
 """Research Brain Pilot: Document -> Extraction -> Evidence -> Facts.
 
-Four purely additive models, independent of the frozen Milestone 1 schema
-(``migrations/m1_table_inventory.py``'s ``M1_TABLES``). ``ExtractionRun`` and
-``Evidence`` are append-only provenance for one extraction pass over one
-document's already-stored content. ``ExtractedFact`` is a structured, typed
-data point following the exact immutable/append-only discipline already used
-by ``OwnershipSnapshot``/``ResearchRevision``: a later, contradictory reading
-of the same ``(company_id, fact_type, period)`` is recorded as a *new* row
-naming the fact it supersedes, never an in-place edit. ``FactEvidence`` is the
-many-to-many join that makes cross-document corroboration representable --
-one fact may be backed by evidence from several independent documents.
+Five purely additive models, independent of the frozen Milestone 1 schema
+(``migrations/m1_table_inventory.py``'s ``M1_TABLES``). ``ExtractionRun`` is
+append-only provenance for one extraction pass over one document.
+``ExtractionUnit`` persists that pass's page/section/table-level
+machine-readable content so a document is read once, not re-extracted for
+every new fact; existing units mean "already processed," never
+"permanently prohibited from reprocessing" -- a later ``ExtractionRun`` may
+intentionally reprocess the same document, preserving the prior run/units
+unchanged. ``Evidence`` is append-only provenance for one excerpt, optionally
+citing the specific ``ExtractionUnit`` it was drawn from. ``ExtractedFact``
+is a structured, typed data point following the exact immutable/append-only
+discipline already used by ``OwnershipSnapshot``/``ResearchRevision``: a
+later, contradictory reading of the same ``(company_id, fact_type, period)``
+is recorded as a *new* row naming the fact it supersedes, never an in-place
+edit. ``FactEvidence`` is the many-to-many join that makes cross-document
+corroboration representable -- one fact may be backed by evidence from
+several independent documents.
 
 ``as_of_date`` is deliberately distinct from the inherited ``created_at``:
 ``created_at`` is row-insert bookkeeping, while ``as_of_date`` is epistemic
@@ -58,6 +65,69 @@ class ExtractionRun(BaseModel):
         return f"<ExtractionRun {self.document_id} {self.method}>"
 
 
+class ExtractionUnit(BaseModel):
+    """One page/section/table-level machine-readable content unit.
+
+    Produced by one ``ExtractionRun`` (unchanged) over one ``Document``.
+    Immutable, same discipline as ``Evidence``/``ExtractedFact``. Existing
+    units mean "already processed" -- never "permanently prohibited from
+    reprocessing": a later ``ExtractionRun`` may intentionally reprocess the
+    same document with a different/improved method, producing a fresh set
+    of units tied to the new run while the prior run and its units are
+    preserved unchanged. Skipping an already-processed document is a
+    per-run choice made by the caller (via ``get_extraction_units``
+    returning non-empty), not a constraint this schema enforces.
+    """
+
+    __tablename__ = "extraction_unit"
+
+    extraction_run_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("extraction_run.id"), nullable=False
+    )
+    document_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("document.id"), nullable=False
+    )
+    unit_type: so.Mapped[str] = so.mapped_column(
+        enum_type("extraction_unit_type", ("PAGE", "SECTION", "TABLE")),
+        nullable=False,
+    )
+    sequence_number: so.Mapped[int] = so.mapped_column(
+        sa.Integer, nullable=False
+    )
+    locator: so.Mapped[str | None] = so.mapped_column(
+        sa.String(200), nullable=True
+    )
+    content_text: so.Mapped[str] = so.mapped_column(sa.Text, nullable=False)
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "extraction_run_id",
+            "unit_type",
+            "sequence_number",
+            name="uq_extraction_unit_run_type_sequence",
+        ),
+    )
+
+    extraction_run: so.Mapped["ExtractionRun"] = so.relationship(
+        "ExtractionRun", viewonly=True
+    )
+    document: so.Mapped["Document"] = so.relationship(
+        "Document", viewonly=True
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ExtractionUnit {self.document_id} "
+            f"{self.unit_type}#{self.sequence_number}>"
+        )
+
+
 class Evidence(BaseModel):
     """One excerpt of source text tied to exactly one extraction run/document.
 
@@ -80,6 +150,9 @@ class Evidence(BaseModel):
     locator: so.Mapped[str | None] = so.mapped_column(
         sa.String(200), nullable=True
     )
+    source_extraction_unit_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("extraction_unit.id"), nullable=True
+    )
     created_by_user_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("user.id"), nullable=False
     )
@@ -89,6 +162,9 @@ class Evidence(BaseModel):
     )
     document: so.Mapped["Document"] = so.relationship(
         "Document", viewonly=True
+    )
+    source_extraction_unit: so.Mapped["ExtractionUnit | None"] = so.relationship(
+        "ExtractionUnit", viewonly=True
     )
     created_by_user: so.Mapped["User"] = so.relationship(
         "User", viewonly=True
@@ -210,6 +286,6 @@ def _reject_immutable_delete(_mapper, _connection, target) -> None:
     )
 
 
-for _immutable_model in (ExtractionRun, Evidence, ExtractedFact):
+for _immutable_model in (ExtractionRun, ExtractionUnit, Evidence, ExtractedFact):
     sa.event.listen(_immutable_model, "before_update", _reject_immutable_update)
     sa.event.listen(_immutable_model, "before_delete", _reject_immutable_delete)

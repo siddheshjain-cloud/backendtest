@@ -20,6 +20,7 @@ from app.models.research_brain import (
     Evidence,
     ExtractedFact,
     ExtractionRun,
+    ExtractionUnit,
     FactEvidence,
 )
 from app.utils.research_errors import ResearchValidationError
@@ -46,6 +47,55 @@ class ResearchBrainService:
         return run
 
     @classmethod
+    def record_extraction_unit(
+        cls,
+        *,
+        extraction_run_id: str,
+        document_id: str,
+        unit_type: str,
+        sequence_number: int,
+        content_text: str,
+        created_by_user_id: str,
+        locator: str | None = None,
+    ) -> ExtractionUnit:
+        unit = ExtractionUnit(
+            extraction_run_id=extraction_run_id,
+            document_id=document_id,
+            unit_type=unit_type,
+            sequence_number=sequence_number,
+            content_text=content_text,
+            locator=locator,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(unit)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return unit
+
+    @classmethod
+    def get_extraction_units(cls, document_id: str) -> list[ExtractionUnit]:
+        """Every persisted unit for a document, across all extraction runs.
+
+        An empty result is the "not yet processed" signal; a non-empty
+        result means "already processed" -- a per-caller choice to skip
+        re-extraction, never a constraint this schema enforces. A later,
+        intentional reprocessing pass simply calls ``record_extraction_unit``
+        again under a new ``extraction_run_id``; the prior run's units are
+        untouched.
+        """
+
+        return list(
+            db.session.scalars(
+                sa.select(ExtractionUnit).where(
+                    ExtractionUnit.document_id == document_id
+                )
+            ).all()
+        )
+
+    @classmethod
     def record_evidence(
         cls,
         *,
@@ -54,12 +104,14 @@ class ResearchBrainService:
         text_snippet: str,
         created_by_user_id: str,
         locator: str | None = None,
+        source_extraction_unit_id: str | None = None,
     ) -> Evidence:
         evidence = Evidence(
             extraction_run_id=extraction_run_id,
             document_id=document_id,
             text_snippet=text_snippet,
             locator=locator,
+            source_extraction_unit_id=source_extraction_unit_id,
             created_by_user_id=created_by_user_id,
         )
         try:

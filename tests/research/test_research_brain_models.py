@@ -173,6 +173,8 @@ def test_extraction_run_cannot_be_updated_or_deleted(app, admin_user, document):
 
 
 def test_evidence_has_exact_columns(app):
+    # source_extraction_unit_id was added in Task 6 (ExtractionUnit layer) --
+    # additive only, nullable; see test_research_brain_extraction_unit_models.py.
     assert _reflected_columns("evidence") == {
         "id": False,
         "created_at": False,
@@ -180,6 +182,7 @@ def test_evidence_has_exact_columns(app):
         "document_id": False,
         "text_snippet": False,
         "locator": True,
+        "source_extraction_unit_id": True,
         "created_by_user_id": False,
     }
 
