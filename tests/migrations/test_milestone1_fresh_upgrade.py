@@ -1,7 +1,10 @@
 """Fresh-database Milestone 1 migration path.
 
-Empty temporary SQLite -> ``upgrade head`` -> assert the legacy schema plus the
-complete Milestone 1 table set, constraints, indexes, and revision marker.
+Empty temporary SQLite -> upgrade to the frozen M1 revision (``20260904_02``,
+not whatever the overall alembic ``head`` is -- later, separately-approved
+migrations such as the Research Brain Pilot's chain after it) -> assert the
+legacy schema plus the complete Milestone 1 table set, constraints, indexes,
+and revision marker.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ M1_HEAD = "20260904_02"
 
 def _fresh_database(tmp_path, name: str) -> str:
     url = f"sqlite:///{(tmp_path / name).as_posix()}"
-    upgrade_database(url, "head")
+    upgrade_database(url, M1_HEAD)
     return url
 
 
@@ -52,7 +55,7 @@ def test_fresh_upgrade_leaves_legacy_tables_unchanged(tmp_path):
 
     legacy_snapshot = schema_snapshot(url, LEGACY_TABLES)
 
-    upgrade_database(url, "head")
+    upgrade_database(url, M1_HEAD)
 
     assert schema_snapshot(url, LEGACY_TABLES) == legacy_snapshot
 

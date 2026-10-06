@@ -39,7 +39,7 @@ def _model_metadata_database(tmp_path, name: str) -> str:
     return url
 
 
-def _upgraded_database(tmp_path, name: str, *, revision: str = "head") -> str:
+def _upgraded_database(tmp_path, name: str, *, revision: str = M1_HEAD) -> str:
     url = _database_url(tmp_path, name)
     upgrade_database(url, revision)
     return url

@@ -1,8 +1,11 @@
 """Existing-schema Milestone 1 migration path.
 
 Create an exact legacy schema copy -> stamp ``20260904_01`` -> snapshot the
-legacy tables -> ``upgrade head`` -> assert the legacy snapshot is unchanged
-and the complete Milestone 1 table set now exists.
+legacy tables -> upgrade to the frozen M1 revision (``20260904_02``, not
+whatever the overall alembic ``head`` is -- later, separately-approved
+migrations such as the Research Brain Pilot's chain after it) -> assert the
+legacy snapshot is unchanged and the complete Milestone 1 table set now
+exists.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ def test_existing_schema_copy_upgrades_additively_without_legacy_changes(tmp_pat
 
     legacy_snapshot = schema_snapshot(url, LEGACY_TABLES)
 
-    upgrade_database(url, "head")
+    upgrade_database(url, M1_HEAD)
 
     after_inventory = inspect_schema(url)
 
