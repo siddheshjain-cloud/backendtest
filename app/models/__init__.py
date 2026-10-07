@@ -37,6 +37,8 @@ from .research_brain import (
     FactEvidence,
 )
 from .research_coverage import (
+    CandidateFinding,
+    CandidateFindingDecision,
     CoverageDocumentSubtype,
     CoverageProfile,
     CoverageProfileDimension,

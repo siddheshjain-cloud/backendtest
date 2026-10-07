@@ -1,4 +1,4 @@
-"""Research Coverage & Fact Intelligence, Slice 1: ``ResearchCoverageService``.
+"""Research Coverage & Fact Intelligence, Slices 1-2: ``ResearchCoverageService``.
 
 Mirrors ``ResearchBrainService``'s transactional shape exactly: each write
 method is one atomic commit (explicit ``db.session.add``/``flush``/
@@ -25,6 +25,15 @@ already exist for the pair. This is the mechanical guard against
 "narrow-task tunnel vision" the whole capability exists to build; a pass
 covering only part of a document, or re-reading pages already covered,
 can never, by construction, produce a false completion.
+
+Slice 2 adds candidate-finding staging: ``record_candidate_finding`` logs
+an evidence-grounded proposal found during a sweep without asserting it as
+a Fact; ``promote_candidate_finding``/``reject_candidate_finding``/
+``mark_candidate_finding_duplicate`` triage it exactly once (locked against
+the same concurrent-double-decision race Slice 1's duplicate-CoverageRecord
+bug exposed). Promotion never bypasses ``ResearchBrainService.record_fact``'s
+"at least one evidence" rule -- it always creates a real ``Evidence`` row
+from the candidate's own quote first.
 """
 
 from __future__ import annotations
@@ -36,8 +45,10 @@ import sqlalchemy.orm as so
 
 from app import db
 from app.models.document import Document, DocumentCompanyLink
-from app.models.research_brain import ExtractionRun, ExtractionUnit
+from app.models.research_brain import Evidence, ExtractedFact, ExtractionRun, ExtractionUnit
 from app.models.research_coverage import (
+    CandidateFinding,
+    CandidateFindingDecision,
     CoverageDocumentSubtype,
     CoverageProfile,
     CoverageProfileDimension,
@@ -45,6 +56,7 @@ from app.models.research_coverage import (
     CoverageReviewPass,
     ResearchDimension,
 )
+from app.services.research_brain_service import ResearchBrainService
 from app.utils.research_errors import ResearchValidationError
 
 
@@ -279,9 +291,16 @@ class ResearchCoverageService:
         alone, with no units, would silently and permanently block
         completeness (its unit count is 0) even though a prior run holds
         the document's real, fully-captured text.
+
+        The id is resolved via a plain (unlocked) aggregate query -- a
+        ``GROUP BY``/``HAVING`` query combined with ``FOR UPDATE`` is
+        rejected outright by PostgreSQL ("FOR UPDATE is not allowed with
+        GROUP BY clause"), so locking, when requested, is a second, simple
+        by-id row lock against the already-resolved id instead of being
+        folded into the aggregate query itself.
         """
 
-        query = (
+        run_id = db.session.scalar(
             sa.select(ExtractionRun.id)
             .join(
                 ExtractionUnit,
@@ -293,9 +312,13 @@ class ResearchCoverageService:
             .order_by(ExtractionRun.created_at.desc())
             .limit(1)
         )
-        if for_update:
-            query = query.with_for_update()
-        return db.session.scalar(query)
+        if for_update and run_id is not None:
+            db.session.scalar(
+                sa.select(ExtractionRun.id)
+                .where(ExtractionRun.id == run_id)
+                .with_for_update()
+            )
+        return run_id
 
     @classmethod
     def record_coverage_review_pass(
@@ -429,16 +452,28 @@ class ResearchCoverageService:
                     if any_material_content
                     else "REVIEWED_NO_FINDING"
                 )
-                db.session.add(
-                    CoverageRecord(
-                        document_id=document_id,
-                        extraction_run_id=current_run_id,
-                        research_dimension_id=research_dimension_id,
-                        state=state,
-                        review_pass_id=review_pass.id,
-                    )
-                )
-                db.session.flush()
+                # A savepoint, not a bare add/flush: the application-level
+                # "lock existing rows, then decide" guard above has a real
+                # gap for the *first-ever* close of a triple -- there is no
+                # existing CoverageRecord row yet to lock, so two concurrent
+                # first-time closes could both reach this branch. The
+                # database-level unique constraint on CoverageRecord is the
+                # actual guarantee; a savepoint lets that constraint's
+                # violation (the loser of the race) roll back only this
+                # insert, not the review pass this call already recorded.
+                try:
+                    with db.session.begin_nested():
+                        db.session.add(
+                            CoverageRecord(
+                                document_id=document_id,
+                                extraction_run_id=current_run_id,
+                                research_dimension_id=research_dimension_id,
+                                state=state,
+                                review_pass_id=review_pass.id,
+                            )
+                        )
+                except sa.exc.IntegrityError:
+                    pass  # another concurrent call already closed this triple
 
             db.session.commit()
         except Exception:
@@ -564,3 +599,366 @@ class ResearchCoverageService:
             "required_dimension_coverage_pct": coverage_percentage,
             "document_statuses": document_statuses,
         }
+
+    # -----------------------------------------------------------------
+    # Candidate findings (Slice 2)
+    # -----------------------------------------------------------------
+
+    @classmethod
+    def record_candidate_finding(
+        cls,
+        *,
+        document_id: str,
+        research_dimension_id: str,
+        source_extraction_unit_id: str,
+        review_pass_id: str,
+        raw_quote: str,
+        created_by_user_id: str,
+        proposed_fact_type: str | None = None,
+        proposed_value: str | None = None,
+        proposed_value_type: str | None = None,
+        proposed_unit: str | None = None,
+        proposed_period: str | None = None,
+        proposed_as_of_date: date | None = None,
+    ) -> CandidateFinding:
+        """Stage one evidence-grounded proposal found during a coverage
+        sweep. Non-authoritative -- it only becomes a Fact through
+        ``promote_candidate_finding``."""
+
+        finding = CandidateFinding(
+            document_id=document_id,
+            research_dimension_id=research_dimension_id,
+            source_extraction_unit_id=source_extraction_unit_id,
+            review_pass_id=review_pass_id,
+            raw_quote=raw_quote,
+            proposed_fact_type=proposed_fact_type,
+            proposed_value=proposed_value,
+            proposed_value_type=proposed_value_type,
+            proposed_unit=proposed_unit,
+            proposed_period=proposed_period,
+            proposed_as_of_date=proposed_as_of_date,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(finding)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return finding
+
+    @classmethod
+    def _current_decision(
+        cls, candidate_finding_id: str, *, for_update: bool = False
+    ) -> CandidateFindingDecision | None:
+        """Most recent decision row for a candidate, or ``None`` if it is
+        still ``OPEN`` -- no row is ever written to represent ``OPEN``."""
+
+        query = (
+            sa.select(CandidateFindingDecision)
+            .where(
+                CandidateFindingDecision.candidate_finding_id
+                == candidate_finding_id
+            )
+            .order_by(CandidateFindingDecision.created_at.desc())
+            .limit(1)
+        )
+        if for_update:
+            query = query.with_for_update()
+        return db.session.scalars(query).first()
+
+    @classmethod
+    def get_candidate_finding_status(cls, candidate_finding_id: str) -> str:
+        """``OPEN`` | ``PROMOTED`` | ``REJECTED`` | ``DUPLICATE``."""
+
+        decision = cls._current_decision(candidate_finding_id)
+        return decision.decision if decision is not None else "OPEN"
+
+    @classmethod
+    def _lock_and_require_open(cls, candidate_finding_id: str) -> None:
+        """Lock any existing decision row for this candidate before
+        deciding whether it's still OPEN -- the same race Slice 1's
+        duplicate-CoverageRecord bug exposed: two concurrent triage calls
+        must not both read "still open" and both write a decision."""
+
+        decision = cls._current_decision(candidate_finding_id, for_update=True)
+        if decision is not None:
+            raise ResearchValidationError(
+                {
+                    "candidate_finding_id": [
+                        f"Already decided: {decision.decision}"
+                    ]
+                }
+            )
+
+    @classmethod
+    def promote_candidate_finding(
+        cls,
+        *,
+        candidate_finding_id: str,
+        company_id: str,
+        created_by_user_id: str,
+        fact_type: str | None = None,
+        value: str | None = None,
+        value_type: str | None = None,
+        unit: str | None = None,
+        period: str | None = None,
+        as_of_date: date | None = None,
+        supersedes_fact_id: str | None = None,
+        locator: str | None = None,
+    ) -> CandidateFindingDecision:
+        """Promote a ``CandidateFinding`` into a real, fully-sourced Fact.
+
+        Creates a fresh ``Evidence`` row from the candidate's own
+        ``raw_quote``/``source_extraction_unit_id`` and calls the existing,
+        unchanged ``ResearchBrainService.record_fact`` -- still requires
+        >=1 Evidence, still participates in existing supersession. A
+        promoted Candidate Finding is exactly as rigorous as a Fact
+        authored today; it is just arrived at systematically.
+
+        Each of ``fact_type``/``value``/``value_type``/``unit``/``period``/
+        ``as_of_date`` left as ``None`` falls back to the candidate's own
+        ``proposed_*`` field. ``company_id`` has no proposed fallback --
+        a ``CandidateFinding`` is document-scoped, not company-scoped, and
+        a document can in principle link to more than one company, so the
+        caller must say which company this Fact belongs to.
+
+        Known, accepted limitation: this is not one atomic transaction
+        across Evidence + Fact + Decision, because ``record_evidence`` and
+        ``record_fact`` each commit on their own and must not be modified
+        (per the approved design, Slice 1-2 reuse them unchanged). The
+        upfront "still open" check's lock is therefore released by those
+        intermediate commits before this method's own final commit -- but
+        the database's ``uq_candidate_finding_decision_one_per_candidate``
+        constraint is the real guarantee, not that lock: if two concurrent
+        calls both pass the upfront check, both create their own Evidence
+        and Fact (a real, accepted waste on the rare losing side), but only
+        one of them can ever successfully insert the ``CandidateFindingDecision``
+        row -- the other fails the unique constraint and raises, so the
+        candidate never ends up ambiguously decided and no silently-lost
+        decision is possible.
+        """
+
+        cls._lock_and_require_open(candidate_finding_id)
+
+        candidate = db.session.get(CandidateFinding, candidate_finding_id)
+        if candidate is None:
+            raise ResearchValidationError(
+                {"candidate_finding_id": ["CandidateFinding not found"]}
+            )
+
+        # `is not None`, consistently, for every field -- not `or` -- so an
+        # explicit override of "" (or 0) is never silently swallowed and
+        # replaced by the candidate's proposed_* value behind the caller's
+        # back.
+        final_fact_type = (
+            fact_type if fact_type is not None else candidate.proposed_fact_type
+        )
+        final_value = value if value is not None else candidate.proposed_value
+        final_value_type = (
+            value_type if value_type is not None else candidate.proposed_value_type
+        )
+        final_unit = unit if unit is not None else candidate.proposed_unit
+        final_period = (
+            period if period is not None else candidate.proposed_period
+        )
+        final_as_of_date = (
+            as_of_date if as_of_date is not None else candidate.proposed_as_of_date
+        )
+
+        missing = [
+            field_name
+            for field_name, field_value in (
+                ("fact_type", final_fact_type),
+                ("value", final_value),
+                ("value_type", final_value_type),
+                ("period", final_period),
+                ("as_of_date", final_as_of_date),
+            )
+            if not field_value
+        ]
+        if missing:
+            raise ResearchValidationError(
+                {
+                    field: [
+                        "Required to promote -- no override given and no "
+                        "proposed_* value on the candidate"
+                    ]
+                    for field in missing
+                }
+            )
+
+        source_unit = db.session.get(
+            ExtractionUnit, candidate.source_extraction_unit_id
+        )
+
+        evidence = ResearchBrainService.record_evidence(
+            extraction_run_id=source_unit.extraction_run_id,
+            document_id=candidate.document_id,
+            text_snippet=candidate.raw_quote,
+            created_by_user_id=created_by_user_id,
+            locator=locator or source_unit.locator,
+            source_extraction_unit_id=candidate.source_extraction_unit_id,
+        )
+        fact = ResearchBrainService.record_fact(
+            company_id=company_id,
+            fact_type=final_fact_type,
+            value_type=final_value_type,
+            value=final_value,
+            unit=final_unit,
+            period=final_period,
+            as_of_date=final_as_of_date,
+            evidence_ids=[evidence.id],
+            created_by_user_id=created_by_user_id,
+            supersedes_fact_id=supersedes_fact_id,
+        )
+
+        try:
+            decision = CandidateFindingDecision(
+                candidate_finding_id=candidate_finding_id,
+                decision="PROMOTED",
+                promoted_to_fact_id=fact.id,
+                created_by_user_id=created_by_user_id,
+            )
+            db.session.add(decision)
+            db.session.commit()
+        except sa.exc.IntegrityError:
+            db.session.rollback()
+            raise ResearchValidationError(
+                {
+                    "candidate_finding_id": [
+                        "Already decided by a concurrent call -- this "
+                        "call's Evidence/Fact were created but this "
+                        "Decision was not recorded"
+                    ]
+                }
+            )
+        except Exception:
+            db.session.rollback()
+            raise
+        return decision
+
+    @classmethod
+    def reject_candidate_finding(
+        cls, *, candidate_finding_id: str, reason: str, created_by_user_id: str
+    ) -> CandidateFindingDecision:
+        """Reject a ``CandidateFinding``. ``reason`` is required -- the
+        service-enforced-not-DB-enforced style ``record_fact``'s "at least
+        one evidence" rule already uses, and the same "never assert
+        without saying why" discipline ``GovernanceFlag`` already applies
+        (``factual_evidence`` vs. ``interpretation``)."""
+
+        cls._lock_and_require_open(candidate_finding_id)
+        if not reason or not reason.strip():
+            raise ResearchValidationError(
+                {"reason": ["Required to reject a candidate finding"]}
+            )
+
+        decision = CandidateFindingDecision(
+            candidate_finding_id=candidate_finding_id,
+            decision="REJECTED",
+            reason=reason,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(decision)
+            db.session.commit()
+        except sa.exc.IntegrityError:
+            db.session.rollback()
+            raise ResearchValidationError(
+                {
+                    "candidate_finding_id": [
+                        "Already decided by a concurrent call"
+                    ]
+                }
+            )
+        except Exception:
+            db.session.rollback()
+            raise
+        return decision
+
+    @classmethod
+    def mark_candidate_finding_duplicate(
+        cls,
+        *,
+        candidate_finding_id: str,
+        duplicate_of_candidate_id: str,
+        created_by_user_id: str,
+        reason: str | None = None,
+    ) -> CandidateFindingDecision:
+        """Mark a ``CandidateFinding`` as a duplicate of another, already
+        on record, candidate finding."""
+
+        cls._lock_and_require_open(candidate_finding_id)
+        if candidate_finding_id == duplicate_of_candidate_id:
+            raise ResearchValidationError(
+                {
+                    "duplicate_of_candidate_id": [
+                        "A candidate finding cannot be a duplicate of itself"
+                    ]
+                }
+            )
+        if db.session.get(CandidateFinding, duplicate_of_candidate_id) is None:
+            raise ResearchValidationError(
+                {"duplicate_of_candidate_id": ["CandidateFinding not found"]}
+            )
+
+        decision = CandidateFindingDecision(
+            candidate_finding_id=candidate_finding_id,
+            decision="DUPLICATE",
+            duplicate_of_candidate_id=duplicate_of_candidate_id,
+            reason=reason,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(decision)
+            db.session.commit()
+        except sa.exc.IntegrityError:
+            db.session.rollback()
+            raise ResearchValidationError(
+                {
+                    "candidate_finding_id": [
+                        "Already decided by a concurrent call"
+                    ]
+                }
+            )
+        except Exception:
+            db.session.rollback()
+            raise
+        return decision
+
+    @classmethod
+    def get_candidate_findings_for_review_pass(
+        cls, review_pass_id: str
+    ) -> list[CandidateFinding]:
+        return list(
+            db.session.scalars(
+                sa.select(CandidateFinding).where(
+                    CandidateFinding.review_pass_id == review_pass_id
+                )
+            ).all()
+        )
+
+    @classmethod
+    def get_open_candidate_findings(
+        cls, document_id: str | None = None
+    ) -> list[CandidateFinding]:
+        """Every ``CandidateFinding`` with no decision row at all
+        (``OPEN``), optionally narrowed to one document.
+
+        One query, not one-plus-N: excludes by id against every candidate
+        that has *any* decision row (a candidate, once decided, is never
+        re-opened, so "has any decision" and "has a current decision" are
+        the same set here).
+        """
+
+        decided_ids = sa.select(
+            CandidateFindingDecision.candidate_finding_id
+        ).distinct()
+
+        query = sa.select(CandidateFinding).where(
+            CandidateFinding.id.not_in(decided_ids)
+        )
+        if document_id is not None:
+            query = query.where(CandidateFinding.document_id == document_id)
+        return list(db.session.scalars(query).all())

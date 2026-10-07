@@ -218,6 +218,19 @@ def test_coverage_record_table_shape(tmp_path):
     assert (("research_dimension_id",), "research_dimension") in foreign_keys
     assert (("review_pass_id",), "coverage_review_pass") in foreign_keys
 
+    unique_columns = {
+        tuple(sorted(constraint["columns"]))
+        for constraint in snapshot["unique_constraints"]
+    }
+    assert (
+        tuple(
+            sorted(
+                ["document_id", "extraction_run_id", "research_dimension_id"]
+            )
+        )
+        in unique_columns
+    ), "at most one CoverageRecord per (document, run, dimension) must be DB-enforced"
+
 
 def test_downgrade_removes_exactly_the_six_tables(tmp_path):
     url = _database_url(tmp_path, "coverage-foundation-downgrade.db")

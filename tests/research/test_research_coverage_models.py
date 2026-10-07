@@ -456,6 +456,51 @@ def test_coverage_record_cannot_be_updated_or_deleted(
     db.session.rollback()
 
 
+def test_at_most_one_coverage_record_per_run_dimension_db_enforced(
+    app, admin_user, document, dimension, extraction_run
+):
+    """A code-review finding: the application-level 'lock existing rows,
+    then decide' guard in record_coverage_review_pass has a real gap for
+    the *first-ever* close of a (document, run, dimension) triple -- there
+    is no existing row yet to lock. The database unique constraint is the
+    actual guarantee; this test proves it directly, independent of the
+    service's locking logic."""
+
+    pass_one = CoverageReviewPass(
+        document_id=document.id,
+        extraction_run_id=extraction_run.id,
+        research_dimension_id=dimension.id,
+        units_considered_count=1,
+        units_considered_min_seq=1,
+        units_considered_max_seq=1,
+        performed_by_user_id=admin_user.id,
+    )
+    db.session.add(pass_one)
+    db.session.flush()
+
+    first = CoverageRecord(
+        document_id=document.id,
+        extraction_run_id=extraction_run.id,
+        research_dimension_id=dimension.id,
+        state="REVIEWED_NO_FINDING",
+        review_pass_id=pass_one.id,
+    )
+    db.session.add(first)
+    db.session.commit()
+
+    second = CoverageRecord(
+        document_id=document.id,
+        extraction_run_id=extraction_run.id,
+        research_dimension_id=dimension.id,
+        state="FINDING_GENERATED",
+        review_pass_id=pass_one.id,
+    )
+    db.session.add(second)
+    with pytest.raises(sa.exc.IntegrityError):
+        db.session.commit()
+    db.session.rollback()
+
+
 def test_coverage_record_state_rejects_invalid_value(
     app, admin_user, document, dimension, extraction_run
 ):

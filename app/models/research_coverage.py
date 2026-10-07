@@ -1,6 +1,7 @@
-"""Research Coverage & Fact Intelligence, Slice 1: the Coverage Foundation.
+"""Research Coverage & Fact Intelligence, Slices 1-2: Coverage Foundation
+and Candidate Findings.
 
-Six purely additive models, independent of the frozen Milestone 1 schema
+Eight purely additive models, independent of the frozen Milestone 1 schema
 (``migrations/m1_table_inventory.py``'s ``M1_TABLES``) and of the Research
 Brain Pilot's own two frozen sets (``RESEARCH_BRAIN_PILOT_TABLES``,
 ``RESEARCH_BRAIN_EXTRACTION_UNIT_TABLES``). This slice is the "accounting
@@ -49,6 +50,18 @@ re-read pages) and finds their union covers the run's entire
 tunnel-vision guard: a pass covering only part of a document's units --
 or re-reading pages another pass already covered -- can never, by
 construction, produce a ``CoverageRecord``.
+
+Slice 2 adds ``CandidateFinding`` and ``CandidateFindingDecision`` -- the
+evidence-backed staging step between a coverage sweep finding something and
+that something becoming an authoritative ``ExtractedFact``. A
+``CandidateFinding`` always cites a real ``ExtractionUnit`` and the
+``CoverageReviewPass`` that found it; triage into exactly one of
+``ResearchCoverageService.promote_candidate_finding``,
+``reject_candidate_finding``, or ``mark_candidate_finding_duplicate`` is a
+deliberate, separate, human-decided act. Promotion calls the existing,
+unchanged ``ResearchBrainService.record_evidence``/``record_fact`` -- never
+a shortcut around the "every Fact needs >=1 Evidence" rule those methods
+already enforce.
 """
 
 from __future__ import annotations
@@ -296,12 +309,14 @@ class CoverageRecord(BaseModel):
     """Append-only coverage state for one (document, extraction run,
     dimension) triple.
 
-    Immutable. "Current state" for a given ``(document_id,
-    extraction_run_id, research_dimension_id)`` triple is the most recent
-    row by ``created_at`` -- the same idiom as ``ExtractedFact``
-    supersession, applied to a state log instead of a value. The absence of
-    any row for a triple already means ``NOT_REVIEWED``; no row is ever
-    written to represent that state.
+    Immutable. At most one row ever exists per ``(document_id,
+    extraction_run_id, research_dimension_id)`` triple -- enforced by a
+    database unique constraint, not merely application-level care, because
+    a purely application-level "lock existing rows, then decide" guard has
+    a real gap: the *first-ever* close for a triple has no existing row to
+    lock, so two concurrent first-time closes could otherwise both insert.
+    The absence of any row for a triple means ``NOT_REVIEWED``; no row is
+    ever written to represent that state.
 
     ``extraction_run_id`` matters for the same reason it matters on
     ``CoverageReviewPass``: if a document is reprocessed under a new run, a
@@ -332,6 +347,15 @@ class CoverageRecord(BaseModel):
         sa.ForeignKey("coverage_review_pass.id"), nullable=False
     )
 
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "document_id",
+            "extraction_run_id",
+            "research_dimension_id",
+            name="uq_coverage_record_run_dimension",
+        ),
+    )
+
     document: so.Mapped["Document"] = so.relationship(
         "Document", viewonly=True
     )
@@ -349,6 +373,173 @@ class CoverageRecord(BaseModel):
         return (
             f"<CoverageRecord document={self.document_id} "
             f"dimension={self.research_dimension_id} state={self.state}>"
+        )
+
+
+class CandidateFinding(BaseModel):
+    """Slice 2: one evidence-grounded, pre-authoritative proposal surfaced
+    during a coverage sweep.
+
+    Immutable. Always cites exactly where it came from -- the document, the
+    dimension it was found under, the specific ``ExtractionUnit`` the quote
+    is drawn from, and the ``CoverageReviewPass`` that found it. A
+    ``CandidateFinding`` is not a Fact; it only becomes one via
+    ``ResearchCoverageService.promote_candidate_finding``, which calls the
+    existing, unchanged ``ResearchBrainService.record_evidence``/
+    ``record_fact`` -- promotion is exactly as rigorous as a Fact authored
+    today, just arrived at systematically instead of ad hoc.
+    """
+
+    __tablename__ = "candidate_finding"
+
+    document_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("document.id"), nullable=False
+    )
+    research_dimension_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("research_dimension.id"), nullable=False
+    )
+    source_extraction_unit_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("extraction_unit.id"), nullable=False
+    )
+    review_pass_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("coverage_review_pass.id"), nullable=False
+    )
+    raw_quote: so.Mapped[str] = so.mapped_column(sa.Text, nullable=False)
+    proposed_fact_type: so.Mapped[str | None] = so.mapped_column(
+        sa.String(100), nullable=True
+    )
+    proposed_value: so.Mapped[str | None] = so.mapped_column(
+        sa.String(4000), nullable=True
+    )
+    proposed_value_type: so.Mapped[str | None] = so.mapped_column(
+        enum_type("candidate_finding_value_type", ("NUMERIC", "TEXT")),
+        nullable=True,
+    )
+    proposed_unit: so.Mapped[str | None] = so.mapped_column(
+        sa.String(50), nullable=True
+    )
+    proposed_period: so.Mapped[str | None] = so.mapped_column(
+        sa.String(50), nullable=True
+    )
+    proposed_as_of_date: so.Mapped[date | None] = so.mapped_column(
+        sa.Date, nullable=True
+    )
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            # coalesce(), not a bare `proposed_value_type = 'NUMERIC'`: this
+            # column (unlike ExtractedFact.value_type, which is NOT NULL) is
+            # nullable, and a bare equality against NULL evaluates to NULL
+            # rather than FALSE -- SQL CHECK constraints treat a NULL result
+            # as satisfied, so `proposed_unit` set with `proposed_value_type`
+            # left NULL would silently pass without the coalesce.
+            "proposed_unit IS NULL "
+            "OR coalesce(proposed_value_type, '') = 'NUMERIC'",
+            name="ck_candidate_finding_unit_requires_numeric",
+        ),
+    )
+
+    document: so.Mapped["Document"] = so.relationship(
+        "Document", viewonly=True
+    )
+    research_dimension: so.Mapped["ResearchDimension"] = so.relationship(
+        "ResearchDimension", viewonly=True
+    )
+    source_extraction_unit: so.Mapped["ExtractionUnit"] = so.relationship(
+        "ExtractionUnit", viewonly=True
+    )
+    review_pass: so.Mapped["CoverageReviewPass"] = so.relationship(
+        "CoverageReviewPass", viewonly=True
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CandidateFinding document={self.document_id} "
+            f"dimension={self.research_dimension_id}>"
+        )
+
+
+class CandidateFindingDecision(BaseModel):
+    """Slice 2: the terminal decision for one ``CandidateFinding``.
+
+    Immutable, insert-only -- and, like ``CoverageRecord``, constrained at
+    the database level to at most one row per ``candidate_finding_id``
+    (``uq_candidate_finding_decision_one_per_candidate``), not merely by
+    application-level care: once decided, a candidate is never re-opened or
+    re-decided, so this is a genuine one-to-zero-or-one relationship, not
+    an app-level "most recent wins" sequence. The absence of any row means
+    ``OPEN`` -- no row is ever written to represent that state, same idiom
+    as ``CoverageRecord``'s absence meaning ``NOT_REVIEWED``. Exactly one of
+    ``promoted_to_fact_id``/``duplicate_of_candidate_id`` is set, and only
+    for the matching ``decision`` -- also enforced at the database via check
+    constraints, not merely convention.
+    """
+
+    __tablename__ = "candidate_finding_decision"
+
+    candidate_finding_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("candidate_finding.id"), nullable=False
+    )
+    decision: so.Mapped[str] = so.mapped_column(
+        enum_type(
+            "candidate_finding_decision_type",
+            ("PROMOTED", "REJECTED", "DUPLICATE"),
+        ),
+        nullable=False,
+    )
+    promoted_to_fact_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("extracted_fact.id"), nullable=True
+    )
+    duplicate_of_candidate_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("candidate_finding.id"), nullable=True
+    )
+    reason: so.Mapped[str | None] = so.mapped_column(sa.Text, nullable=True)
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "(decision = 'PROMOTED') = (promoted_to_fact_id IS NOT NULL)",
+            name="ck_candidate_finding_decision_promoted_iff_fact",
+        ),
+        sa.CheckConstraint(
+            "(decision = 'DUPLICATE') = (duplicate_of_candidate_id IS NOT NULL)",
+            name="ck_candidate_finding_decision_duplicate_iff_target",
+        ),
+        sa.UniqueConstraint(
+            "candidate_finding_id",
+            name="uq_candidate_finding_decision_one_per_candidate",
+        ),
+    )
+
+    candidate_finding: so.Mapped["CandidateFinding"] = so.relationship(
+        "CandidateFinding",
+        foreign_keys="CandidateFindingDecision.candidate_finding_id",
+        viewonly=True,
+    )
+    promoted_to_fact: so.Mapped["ExtractedFact | None"] = so.relationship(
+        "ExtractedFact", viewonly=True
+    )
+    duplicate_of_candidate: so.Mapped["CandidateFinding | None"] = so.relationship(
+        "CandidateFinding",
+        foreign_keys="CandidateFindingDecision.duplicate_of_candidate_id",
+        viewonly=True,
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CandidateFindingDecision candidate={self.candidate_finding_id} "
+            f"decision={self.decision}>"
         )
 
 
@@ -371,6 +562,8 @@ for _immutable_model in (
     CoverageProfileDimension,
     CoverageReviewPass,
     CoverageRecord,
+    CandidateFinding,
+    CandidateFindingDecision,
 ):
     sa.event.listen(_immutable_model, "before_update", _reject_immutable_update)
     sa.event.listen(_immutable_model, "before_delete", _reject_immutable_delete)
