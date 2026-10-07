@@ -241,6 +241,50 @@ def test_subtype_tag_takes_precedence_over_native_type(
     assert {d.code for d in required} == {"GOVERNANCE_RPT"}
 
 
+def test_tagging_a_subtype_with_no_profile_yet_is_rejected(
+    app, admin_user, quarterly_document
+):
+    """A code-review finding: tagging a document with an unknown/typo'd
+    subtype_code used to succeed silently, and get_required_dimensions
+    would then return an empty list -- indistinguishable from a document
+    type that genuinely has zero required dimensions."""
+
+    from app.utils.research_errors import ResearchValidationError
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.tag_document_subtype(
+            document_id=quarterly_document.id,
+            subtype_code="NO_SUCH_PROFILE_YET",
+            assigned_by_user_id=admin_user.id,
+        )
+
+
+def test_code_fields_must_be_upper_slugs(app, admin_user, quarterly_document):
+    from app.utils.research_errors import ResearchValidationError
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.create_dimension(
+            code="not-upper-slug",
+            name="Bad code",
+            description="x",
+        )
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.create_coverage_profile(
+            document_type_code="lowercase_type",
+            dimension_requirements=[],
+            effective_from=date(2026, 1, 1),
+            created_by_user_id=admin_user.id,
+        )
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.tag_document_subtype(
+            document_id=quarterly_document.id,
+            subtype_code="not-a-slug",
+            assigned_by_user_id=admin_user.id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Interval-merge helpers (pure functions, no DB)
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Research Coverage & Fact Intelligence, Slices 1-2: ``ResearchCoverageService``.
+"""Research Coverage & Fact Intelligence, Slices 1-3: ``ResearchCoverageService``.
 
 Mirrors ``ResearchBrainService``'s transactional shape exactly: each write
 method is one atomic commit (explicit ``db.session.add``/``flush``/
@@ -34,6 +34,13 @@ the same concurrent-double-decision race Slice 1's duplicate-CoverageRecord
 bug exposed). Promotion never bypasses ``ResearchBrainService.record_fact``'s
 "at least one evidence" rule -- it always creates a real ``Evidence`` row
 from the candidate's own quote first.
+
+Slice 3 adds ``record_fact_derivation``: provenance-safe metadata for a
+Fact that was computed (e.g. EBITDA from already-extracted raw P&L lines)
+rather than directly quoted. It never touches the Fact itself -- it is a
+pure side-annotation, recorded after the Fact already exists via the
+unchanged ``record_fact``, naming the formula and citing each input as
+either an existing Fact or a raw ``Evidence`` row.
 """
 
 from __future__ import annotations
@@ -54,10 +61,13 @@ from app.models.research_coverage import (
     CoverageProfileDimension,
     CoverageRecord,
     CoverageReviewPass,
+    FactDerivation,
+    FactDerivationInput,
     ResearchDimension,
 )
 from app.services.research_brain_service import ResearchBrainService
-from app.utils.research_errors import ResearchValidationError
+from app.utils.research_errors import ResearchNotFoundError, ResearchValidationError
+from app.utils.research_validation import validate_upper_slug
 
 
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -103,6 +113,7 @@ class ResearchCoverageService:
         description: str,
         is_active: bool = True,
     ) -> ResearchDimension:
+        code = validate_upper_slug(code, "code")
         dimension = ResearchDimension(
             code=code, name=name, description=description, is_active=is_active
         )
@@ -122,6 +133,29 @@ class ResearchCoverageService:
     def tag_document_subtype(
         cls, *, document_id: str, subtype_code: str, assigned_by_user_id: str
     ) -> CoverageDocumentSubtype:
+        """Tag a document with a subtype outside ``document_type``'s
+        closed native enum (DRHP, RHP, ...).
+
+        Requires a ``CoverageProfile`` to already exist for
+        ``subtype_code``. Without this check, a typo'd or not-yet-defined
+        subtype_code would be accepted silently, and
+        ``get_required_dimensions`` would then return an empty list for
+        the tagged document -- indistinguishable from a document type that
+        genuinely has zero required dimensions, with no error raised
+        anywhere.
+        """
+
+        subtype_code = validate_upper_slug(subtype_code, "subtype_code")
+        if cls.get_active_profile(subtype_code) is None:
+            raise ResearchValidationError(
+                {
+                    "subtype_code": [
+                        "No CoverageProfile exists for this subtype_code "
+                        "yet -- create one before tagging a document with it"
+                    ]
+                }
+            )
+
         tag = CoverageDocumentSubtype(
             document_id=document_id,
             subtype_code=subtype_code,
@@ -137,12 +171,23 @@ class ResearchCoverageService:
 
     @classmethod
     def _current_subtype(cls, document_id: str) -> CoverageDocumentSubtype | None:
-        """Most recent ``CoverageDocumentSubtype`` row for a document."""
+        """Most recent ``CoverageDocumentSubtype`` row for a document.
+
+        Tie-broken by ``id`` (same idiom as ``get_active_profile``'s
+        double sort): without a deterministic tiebreaker, two rows
+        inserted within the same ``created_at`` resolution window would
+        make "current subtype" -- and therefore which coverage profile
+        governs the document -- non-deterministic across reads of the
+        same, unchanged data.
+        """
 
         return db.session.scalars(
             sa.select(CoverageDocumentSubtype)
             .where(CoverageDocumentSubtype.document_id == document_id)
-            .order_by(CoverageDocumentSubtype.created_at.desc())
+            .order_by(
+                CoverageDocumentSubtype.created_at.desc(),
+                CoverageDocumentSubtype.id.desc(),
+            )
             .limit(1)
         ).first()
 
@@ -165,6 +210,10 @@ class ResearchCoverageService:
         ``dimension_requirements`` is a list of
         ``(research_dimension_id, is_required, notes)`` tuples.
         """
+
+        document_type_code = validate_upper_slug(
+            document_type_code, "document_type_code"
+        )
 
         try:
             profile = CoverageProfile(
@@ -243,8 +292,8 @@ class ResearchCoverageService:
 
         document = db.session.get(Document, document_id)
         if document is None:
-            raise ResearchValidationError(
-                {"document_id": ["Document not found"]}
+            raise ResearchNotFoundError(
+                "document_not_found", "Document was not found"
             )
 
         subtype = cls._current_subtype(document_id)
@@ -376,6 +425,21 @@ class ResearchCoverageService:
             )
 
         try:
+            # Lock the Document row itself for the duration of this call --
+            # closes a TOCTOU gap in _resolve_current_run_id: that method
+            # resolves the "current" run via an unlocked aggregate query,
+            # then takes a plain by-id lock only on the row it already
+            # found. Without a lock scoped to the document as a whole, a
+            # concurrent transaction could create and commit a brand-new
+            # ExtractionRun (reprocessing) in the gap between that resolve
+            # and that by-id lock, and this call would record its pass
+            # against a run that's already been superseded.
+            db.session.scalar(
+                sa.select(Document.id)
+                .where(Document.id == document_id)
+                .with_for_update()
+            )
+
             current_run_id = cls._resolve_current_run_id(
                 document_id, for_update=True
             )
@@ -404,43 +468,52 @@ class ResearchCoverageService:
             db.session.add(review_pass)
             db.session.flush()
 
-            total_units = db.session.scalar(
-                sa.select(sa.func.count(ExtractionUnit.id)).where(
-                    ExtractionUnit.document_id == document_id,
-                    ExtractionUnit.extraction_run_id == current_run_id,
-                )
-            )
-
-            # Lock existing passes for this pair+run before deciding whether
-            # to close it, so two concurrent submissions can't both read
-            # "not yet closed" and both insert a closing CoverageRecord.
-            passes_for_pair = db.session.scalars(
-                sa.select(CoverageReviewPass)
-                .where(
-                    CoverageReviewPass.document_id == document_id,
-                    CoverageReviewPass.extraction_run_id == current_run_id,
-                    CoverageReviewPass.research_dimension_id
-                    == research_dimension_id,
-                )
-                .with_for_update()
-            ).all()
-
-            covered_units = _union_length(
-                [
-                    (p.units_considered_min_seq, p.units_considered_max_seq)
-                    for p in passes_for_pair
-                ]
-            )
-            any_material_content = any(
-                p.has_material_content for p in passes_for_pair
-            )
-
+            # Cheap check first: once a (document, run, dimension) triple
+            # is closed it never reopens, so there is no need to lock and
+            # re-merge every historical pass for an already-closed triple
+            # on every subsequent, merely-for-the-record pass against it.
             already_closed = (
                 research_dimension_id
                 in cls._current_coverage_records(
                     document_id, extraction_run_id=current_run_id
                 )
             )
+
+            total_units = 0
+            covered_units = 0
+            any_material_content = False
+            if not already_closed:
+                total_units = db.session.scalar(
+                    sa.select(sa.func.count(ExtractionUnit.id)).where(
+                        ExtractionUnit.document_id == document_id,
+                        ExtractionUnit.extraction_run_id == current_run_id,
+                    )
+                )
+
+                # Lock existing passes for this pair+run before deciding
+                # whether to close it, so two concurrent submissions can't
+                # both read "not yet closed" and both insert a closing
+                # CoverageRecord.
+                passes_for_pair = db.session.scalars(
+                    sa.select(CoverageReviewPass)
+                    .where(
+                        CoverageReviewPass.document_id == document_id,
+                        CoverageReviewPass.extraction_run_id == current_run_id,
+                        CoverageReviewPass.research_dimension_id
+                        == research_dimension_id,
+                    )
+                    .with_for_update()
+                ).all()
+
+                covered_units = _union_length(
+                    [
+                        (p.units_considered_min_seq, p.units_considered_max_seq)
+                        for p in passes_for_pair
+                    ]
+                )
+                any_material_content = any(
+                    p.has_material_content for p in passes_for_pair
+                )
 
             if (
                 not already_closed
@@ -675,11 +748,26 @@ class ResearchCoverageService:
         return decision.decision if decision is not None else "OPEN"
 
     @classmethod
-    def _lock_and_require_open(cls, candidate_finding_id: str) -> None:
-        """Lock any existing decision row for this candidate before
-        deciding whether it's still OPEN -- the same race Slice 1's
-        duplicate-CoverageRecord bug exposed: two concurrent triage calls
-        must not both read "still open" and both write a decision."""
+    def _lock_and_require_open(cls, candidate_finding_id: str) -> CandidateFinding:
+        """Check the candidate exists, then lock any existing decision row
+        for it before deciding whether it's still OPEN -- the same race
+        Slice 1's duplicate-CoverageRecord bug exposed: two concurrent
+        triage calls must not both read "still open" and both write a
+        decision.
+
+        The existence check runs first and raises its own clear error,
+        rather than letting a nonexistent id fall through to the later
+        FK-violation IntegrityError that promote/reject/duplicate's own
+        commit would raise -- which gets caught and reported as "already
+        decided by a concurrent call," masking a plain bad id as a
+        transient race.
+        """
+
+        candidate = db.session.get(CandidateFinding, candidate_finding_id)
+        if candidate is None:
+            raise ResearchNotFoundError(
+                "candidate_finding_not_found", "CandidateFinding was not found"
+            )
 
         decision = cls._current_decision(candidate_finding_id, for_update=True)
         if decision is not None:
@@ -690,6 +778,7 @@ class ResearchCoverageService:
                     ]
                 }
             )
+        return candidate
 
     @classmethod
     def promote_candidate_finding(
@@ -739,13 +828,7 @@ class ResearchCoverageService:
         decision is possible.
         """
 
-        cls._lock_and_require_open(candidate_finding_id)
-
-        candidate = db.session.get(CandidateFinding, candidate_finding_id)
-        if candidate is None:
-            raise ResearchValidationError(
-                {"candidate_finding_id": ["CandidateFinding not found"]}
-            )
+        candidate = cls._lock_and_require_open(candidate_finding_id)
 
         # `is not None`, consistently, for every field -- not `or` -- so an
         # explicit override of "" (or 0) is never silently swallowed and
@@ -787,6 +870,16 @@ class ResearchCoverageService:
                     for field in missing
                 }
             )
+        # Fail before any write, not after: the same "unit only valid for
+        # NUMERIC" rule ExtractedFact enforces as a DB check constraint,
+        # checked here too so a mismatched override/fallback combination
+        # never gets as far as committing a real Evidence row for a Fact
+        # that record_fact is about to reject -- an orphaned Evidence row
+        # a retry would simply duplicate, not clean up.
+        if final_unit is not None and final_value_type != "NUMERIC":
+            raise ResearchValidationError(
+                {"unit": ["Only valid when value_type is NUMERIC"]}
+            )
 
         source_unit = db.session.get(
             ExtractionUnit, candidate.source_extraction_unit_id
@@ -797,7 +890,7 @@ class ResearchCoverageService:
             document_id=candidate.document_id,
             text_snippet=candidate.raw_quote,
             created_by_user_id=created_by_user_id,
-            locator=locator or source_unit.locator,
+            locator=locator if locator is not None else source_unit.locator,
             source_extraction_unit_id=candidate.source_extraction_unit_id,
         )
         fact = ResearchBrainService.record_fact(
@@ -899,8 +992,8 @@ class ResearchCoverageService:
                 }
             )
         if db.session.get(CandidateFinding, duplicate_of_candidate_id) is None:
-            raise ResearchValidationError(
-                {"duplicate_of_candidate_id": ["CandidateFinding not found"]}
+            raise ResearchNotFoundError(
+                "candidate_finding_not_found", "CandidateFinding was not found"
             )
 
         decision = CandidateFindingDecision(
@@ -962,3 +1055,99 @@ class ResearchCoverageService:
         if document_id is not None:
             query = query.where(CandidateFinding.document_id == document_id)
         return list(db.session.scalars(query).all())
+
+    # -----------------------------------------------------------------
+    # Fact derivation (Slice 3)
+    # -----------------------------------------------------------------
+
+    @classmethod
+    def record_fact_derivation(
+        cls,
+        *,
+        derived_fact_id: str,
+        formula_description: str,
+        created_by_user_id: str,
+        inputs: list[dict],
+    ) -> FactDerivation:
+        """Record that an already-existing ``ExtractedFact`` was computed
+        by SPA from other already-sourced inputs, rather than directly
+        quoted. Does not touch ``ExtractedFact`` at all -- this is purely
+        additional provenance metadata recorded alongside a Fact that was
+        already created through the normal, unchanged ``record_fact`` call.
+
+        ``inputs`` is a list of dicts, each with exactly one of
+        ``input_fact_id``/``input_evidence_id`` set, plus an optional
+        ``role_label`` (e.g. ``"Finance costs"``). At least one input is
+        required -- a "derivation" from zero inputs is not a derivation.
+        """
+
+        if db.session.get(ExtractedFact, derived_fact_id) is None:
+            raise ResearchNotFoundError(
+                "extracted_fact_not_found", "ExtractedFact was not found"
+            )
+        if not inputs:
+            raise ResearchValidationError(
+                {"inputs": ["At least one derivation input is required"]}
+            )
+        for index, item in enumerate(inputs):
+            has_fact = item.get("input_fact_id") is not None
+            has_evidence = item.get("input_evidence_id") is not None
+            if has_fact == has_evidence:
+                raise ResearchValidationError(
+                    {
+                        f"inputs[{index}]": [
+                            "Exactly one of input_fact_id/input_evidence_id "
+                            "must be set"
+                        ]
+                    }
+                )
+
+        try:
+            derivation = FactDerivation(
+                derived_fact_id=derived_fact_id,
+                formula_description=formula_description,
+                created_by_user_id=created_by_user_id,
+            )
+            db.session.add(derivation)
+            db.session.flush()
+
+            for item in inputs:
+                db.session.add(
+                    FactDerivationInput(
+                        fact_derivation_id=derivation.id,
+                        input_fact_id=item.get("input_fact_id"),
+                        input_evidence_id=item.get("input_evidence_id"),
+                        role_label=item.get("role_label"),
+                    )
+                )
+            db.session.flush()
+            db.session.commit()
+        except sa.exc.IntegrityError:
+            db.session.rollback()
+            raise ResearchValidationError(
+                {
+                    "derived_fact_id": [
+                        "This Fact already has a derivation recorded -- "
+                        "at most one FactDerivation per Fact"
+                    ]
+                }
+            )
+        except Exception:
+            db.session.rollback()
+            raise
+        return derivation
+
+    @classmethod
+    def get_fact_derivation(cls, fact_id: str) -> FactDerivation | None:
+        """The ``FactDerivation`` for a Fact, or ``None`` if it was
+        directly quoted rather than computed."""
+
+        return db.session.scalars(
+            sa.select(FactDerivation).where(
+                FactDerivation.derived_fact_id == fact_id
+            )
+        ).first()
+
+    @classmethod
+    def is_fact_derived(cls, fact_id: str) -> bool:
+        return cls.get_fact_derivation(fact_id) is not None

@@ -1,7 +1,7 @@
-"""Research Coverage & Fact Intelligence, Slices 1-2: Coverage Foundation
-and Candidate Findings.
+"""Research Coverage & Fact Intelligence, Slices 1-3: Coverage Foundation,
+Candidate Findings, and Derived Facts.
 
-Eight purely additive models, independent of the frozen Milestone 1 schema
+Ten purely additive models, independent of the frozen Milestone 1 schema
 (``migrations/m1_table_inventory.py``'s ``M1_TABLES``) and of the Research
 Brain Pilot's own two frozen sets (``RESEARCH_BRAIN_PILOT_TABLES``,
 ``RESEARCH_BRAIN_EXTRACTION_UNIT_TABLES``). This slice is the "accounting
@@ -62,6 +62,15 @@ deliberate, separate, human-decided act. Promotion calls the existing,
 unchanged ``ResearchBrainService.record_evidence``/``record_fact`` -- never
 a shortcut around the "every Fact needs >=1 Evidence" rule those methods
 already enforce.
+
+Slice 3 adds ``FactDerivation``/``FactDerivationInput`` -- provenance-safe
+support for a Fact that was *computed* by SPA (e.g. EBITDA from already-
+extracted raw P&L lines) rather than directly quoted. ``ExtractedFact``
+itself gains no new column and no new "kind": a derived Fact is created
+through the same unchanged ``record_fact`` call as any other Fact, and
+``FactDerivation`` is purely additional metadata recorded alongside it via
+``ResearchCoverageService.record_fact_derivation``, naming the formula and
+citing each raw input as either an existing Fact or a raw ``Evidence`` row.
 """
 
 from __future__ import annotations
@@ -543,6 +552,96 @@ class CandidateFindingDecision(BaseModel):
         )
 
 
+class FactDerivation(BaseModel):
+    """Slice 3: provenance-safe record that an ``ExtractedFact`` was
+    computed by SPA, not directly quoted from a source.
+
+    Immutable. Exactly one per ``derived_fact_id`` (``unique=True``).
+    ``ExtractedFact`` itself is untouched -- no new column, no new "kind"
+    of fact -- so a derived Fact looks like any other Fact to every
+    existing reader (``get_company_facts`` needs no change). A reader who
+    wants to know "stated by the company or computed by SPA" joins to this
+    table: present = computed, absent = direct quote.
+    """
+
+    __tablename__ = "fact_derivation"
+
+    derived_fact_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("extracted_fact.id"), nullable=False, unique=True
+    )
+    formula_description: so.Mapped[str] = so.mapped_column(
+        sa.Text, nullable=False
+    )
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    derived_fact: so.Mapped["ExtractedFact"] = so.relationship(
+        "ExtractedFact", viewonly=True
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+    inputs: so.Mapped[list["FactDerivationInput"]] = so.relationship(
+        "FactDerivationInput", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<FactDerivation fact={self.derived_fact_id}>"
+
+
+class FactDerivationInput(BaseModel):
+    """Slice 3: one input to a derivation -- either an already-promoted
+    ``ExtractedFact`` or a raw ``Evidence`` row not (yet) promoted to its
+    own Fact. Immutable.
+
+    Exactly one of ``input_fact_id``/``input_evidence_id`` is set --
+    enforced via a NULL-safe ``IS NOT NULL`` comparison on both sides
+    (never a bare equality against a nullable column's *value*, which is
+    exactly the check-constraint class of bug Slice 2's code review found:
+    ``x IS NOT NULL`` is always a true boolean, never SQL NULL, regardless
+    of whether ``x`` itself is NULL).
+    """
+
+    __tablename__ = "fact_derivation_input"
+
+    fact_derivation_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("fact_derivation.id"), nullable=False
+    )
+    input_fact_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("extracted_fact.id"), nullable=True
+    )
+    input_evidence_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("evidence.id"), nullable=True
+    )
+    role_label: so.Mapped[str | None] = so.mapped_column(
+        sa.String(100), nullable=True
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "(input_fact_id IS NOT NULL) != (input_evidence_id IS NOT NULL)",
+            name="ck_fact_derivation_input_exactly_one_source",
+        ),
+    )
+
+    fact_derivation: so.Mapped["FactDerivation"] = so.relationship(
+        "FactDerivation", viewonly=True
+    )
+    input_fact: so.Mapped["ExtractedFact | None"] = so.relationship(
+        "ExtractedFact", viewonly=True
+    )
+    input_evidence: so.Mapped["Evidence | None"] = so.relationship(
+        "Evidence", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FactDerivationInput derivation={self.fact_derivation_id} "
+            f"role={self.role_label!r}>"
+        )
+
+
 def _reject_immutable_update(_mapper, _connection, target) -> None:
     raise sa.exc.InvalidRequestError(
         f"{type(target).__name__} is immutable after insertion"
@@ -564,6 +663,8 @@ for _immutable_model in (
     CoverageRecord,
     CandidateFinding,
     CandidateFindingDecision,
+    FactDerivation,
+    FactDerivationInput,
 ):
     sa.event.listen(_immutable_model, "before_update", _reject_immutable_update)
     sa.event.listen(_immutable_model, "before_delete", _reject_immutable_delete)

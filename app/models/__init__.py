@@ -44,6 +44,8 @@ from .research_coverage import (
     CoverageProfileDimension,
     CoverageRecord,
     CoverageReviewPass,
+    FactDerivation,
+    FactDerivationInput,
     ResearchDimension,
 )
 from .utils import *

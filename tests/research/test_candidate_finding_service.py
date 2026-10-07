@@ -30,7 +30,7 @@ from app.models.research_brain import Evidence, ExtractedFact, FactEvidence
 from app.services.document_library_service import DocumentLibraryService
 from app.services.research_brain_service import ResearchBrainService
 from app.services.research_coverage_service import ResearchCoverageService
-from app.utils.research_errors import ResearchValidationError
+from app.utils.research_errors import ResearchNotFoundError, ResearchValidationError
 
 
 @pytest.fixture
@@ -203,6 +203,90 @@ def test_promotion_without_a_fact_type_anywhere_is_rejected(
         ResearchCoverageService.promote_candidate_finding(
             candidate_finding_id=finding.id,
             company_id=company.id,
+            created_by_user_id=admin_user.id,
+        )
+
+
+def test_promotion_rejects_mismatched_unit_and_value_type_before_any_write(
+    admin_user, company, document, dimension, swept_pass
+):
+    """A code-review finding: an override/fallback combination that only
+    becomes an invalid unit+value_type pairing *after* promotion resolves
+    final_unit/final_value_type -- the candidate itself is perfectly
+    valid (TEXT, no unit) -- used to reach record_fact's own DB check
+    constraint only after record_evidence had already committed a real,
+    now-orphaned Evidence row. Must now be rejected before either write
+    happens."""
+
+    review_pass, units = swept_pass
+    finding = ResearchCoverageService.record_candidate_finding(
+        document_id=document.id,
+        research_dimension_id=dimension.id,
+        source_extraction_unit_id=units[0].id,
+        review_pass_id=review_pass.id,
+        raw_quote="Some narrative disclosure, not a number.",
+        created_by_user_id=admin_user.id,
+        proposed_fact_type="some_text_fact",
+        proposed_value_type="TEXT",
+        proposed_value="A qualitative statement.",
+        proposed_period="FY2026",
+    )
+
+    from app.models.research_brain import Evidence
+    import sqlalchemy as sa
+
+    evidence_count_before = db.session.scalar(
+        sa.select(sa.func.count(Evidence.id))
+    )
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.promote_candidate_finding(
+            candidate_finding_id=finding.id,
+            company_id=company.id,
+            created_by_user_id=admin_user.id,
+            # value_type stays TEXT (from the candidate's proposed_*), but
+            # this override alone makes the final combination invalid --
+            # the mismatch only exists after promotion resolves both.
+            unit="INR_CRORE",
+        )
+
+    evidence_count_after = db.session.scalar(
+        sa.select(sa.func.count(Evidence.id))
+    )
+    assert evidence_count_after == evidence_count_before, (
+        "no Evidence row should be created when promotion is rejected "
+        "before any write"
+    )
+    assert (
+        ResearchCoverageService.get_candidate_finding_status(finding.id)
+        == "OPEN"
+    )
+
+
+def test_reject_and_duplicate_report_not_found_for_a_bad_candidate_id(
+    admin_user,
+):
+    """A code-review finding: a nonexistent candidate_finding_id used to
+    fall through to a later FK-violation IntegrityError, caught and
+    misreported as 'already decided by a concurrent call' -- masking a
+    plain bad id as a transient race. Must now raise the same
+    ResearchNotFoundError this codebase already uses elsewhere for a
+    genuinely missing resource (document_library_service.py), not a
+    validation error."""
+
+    bogus_id = "00000000-0000-0000-0000-000000000000"
+
+    with pytest.raises(ResearchNotFoundError):
+        ResearchCoverageService.reject_candidate_finding(
+            candidate_finding_id=bogus_id,
+            reason="irrelevant",
+            created_by_user_id=admin_user.id,
+        )
+
+    with pytest.raises(ResearchNotFoundError):
+        ResearchCoverageService.mark_candidate_finding_duplicate(
+            candidate_finding_id=bogus_id,
+            duplicate_of_candidate_id=bogus_id,
             created_by_user_id=admin_user.id,
         )
 
