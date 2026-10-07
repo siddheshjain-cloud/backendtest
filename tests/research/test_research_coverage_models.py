@@ -80,6 +80,15 @@ def document(admin_user, company):
 
 
 @pytest.fixture
+def extraction_run(admin_user, document):
+    return ResearchBrainService.create_extraction_run(
+        document_id=document.id,
+        method="manual_pilot",
+        extracted_by_user_id=admin_user.id,
+    )
+
+
+@pytest.fixture
 def dimension():
     dim = ResearchDimension(
         code="GOVERNANCE_RPT",
@@ -344,6 +353,7 @@ def test_coverage_review_pass_foreign_keys(app):
         for constraint in inspector.get_foreign_keys("coverage_review_pass")
     }
     assert foreign_keys[frozenset({"document_id"})] == "document"
+    assert foreign_keys[frozenset({"extraction_run_id"})] == "extraction_run"
     assert (
         foreign_keys[frozenset({"research_dimension_id"})] == "research_dimension"
     )
@@ -351,13 +361,36 @@ def test_coverage_review_pass_foreign_keys(app):
     assert foreign_keys[frozenset({"performed_by_user_id"})] == "user"
 
 
+def test_coverage_review_pass_requires_a_contiguous_range(
+    app, admin_user, document, dimension, extraction_run
+):
+    """DB-level check constraint: count must equal max - min + 1."""
+
+    mismatched = CoverageReviewPass(
+        document_id=document.id,
+        extraction_run_id=extraction_run.id,
+        research_dimension_id=dimension.id,
+        units_considered_count=3,
+        units_considered_min_seq=1,
+        units_considered_max_seq=10,
+        performed_by_user_id=admin_user.id,
+    )
+    db.session.add(mismatched)
+    with pytest.raises(sa.exc.IntegrityError):
+        db.session.commit()
+    db.session.rollback()
+
+
 def test_coverage_review_pass_cannot_be_updated_or_deleted(
-    app, admin_user, document, dimension
+    app, admin_user, document, dimension, extraction_run
 ):
     review_pass = CoverageReviewPass(
         document_id=document.id,
+        extraction_run_id=extraction_run.id,
         research_dimension_id=dimension.id,
         units_considered_count=3,
+        units_considered_min_seq=1,
+        units_considered_max_seq=3,
         performed_by_user_id=admin_user.id,
     )
     db.session.add(review_pass)
@@ -388,12 +421,15 @@ def test_coverage_record_foreign_keys(app):
 
 
 def test_coverage_record_cannot_be_updated_or_deleted(
-    app, admin_user, document, dimension
+    app, admin_user, document, dimension, extraction_run
 ):
     review_pass = CoverageReviewPass(
         document_id=document.id,
+        extraction_run_id=extraction_run.id,
         research_dimension_id=dimension.id,
         units_considered_count=1,
+        units_considered_min_seq=1,
+        units_considered_max_seq=1,
         performed_by_user_id=admin_user.id,
     )
     db.session.add(review_pass)
@@ -401,6 +437,7 @@ def test_coverage_record_cannot_be_updated_or_deleted(
 
     record = CoverageRecord(
         document_id=document.id,
+        extraction_run_id=extraction_run.id,
         research_dimension_id=dimension.id,
         state="REVIEWED_NO_FINDING",
         review_pass_id=review_pass.id,
@@ -420,12 +457,15 @@ def test_coverage_record_cannot_be_updated_or_deleted(
 
 
 def test_coverage_record_state_rejects_invalid_value(
-    app, admin_user, document, dimension
+    app, admin_user, document, dimension, extraction_run
 ):
     review_pass = CoverageReviewPass(
         document_id=document.id,
+        extraction_run_id=extraction_run.id,
         research_dimension_id=dimension.id,
         units_considered_count=1,
+        units_considered_min_seq=1,
+        units_considered_max_seq=1,
         performed_by_user_id=admin_user.id,
     )
     db.session.add(review_pass)
@@ -435,6 +475,7 @@ def test_coverage_record_state_rejects_invalid_value(
         db.session.add(
             CoverageRecord(
                 document_id=document.id,
+                extraction_run_id=extraction_run.id,
                 research_dimension_id=dimension.id,
                 state="BOGUS_STATE",
                 review_pass_id=review_pass.id,

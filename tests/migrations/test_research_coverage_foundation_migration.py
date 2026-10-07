@@ -173,6 +173,7 @@ def test_coverage_review_pass_table_shape(tmp_path):
         "id",
         "created_at",
         "document_id",
+        "extraction_run_id",
         "research_dimension_id",
         "coverage_profile_id",
         "units_considered_count",
@@ -187,6 +188,7 @@ def test_coverage_review_pass_table_shape(tmp_path):
         (tuple(fk["columns"]), fk["referred_table"]) for fk in snapshot["foreign_keys"]
     }
     assert (("document_id",), "document") in foreign_keys
+    assert (("extraction_run_id",), "extraction_run") in foreign_keys
     assert (("research_dimension_id",), "research_dimension") in foreign_keys
     assert (("coverage_profile_id",), "coverage_profile") in foreign_keys
     assert (("performed_by_user_id",), "user") in foreign_keys
@@ -202,6 +204,7 @@ def test_coverage_record_table_shape(tmp_path):
         "id",
         "created_at",
         "document_id",
+        "extraction_run_id",
         "research_dimension_id",
         "state",
         "review_pass_id",
@@ -211,6 +214,7 @@ def test_coverage_record_table_shape(tmp_path):
         (tuple(fk["columns"]), fk["referred_table"]) for fk in snapshot["foreign_keys"]
     }
     assert (("document_id",), "document") in foreign_keys
+    assert (("extraction_run_id",), "extraction_run") in foreign_keys
     assert (("research_dimension_id",), "research_dimension") in foreign_keys
     assert (("review_pass_id",), "coverage_review_pass") in foreign_keys
 

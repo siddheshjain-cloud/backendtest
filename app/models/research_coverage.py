@@ -36,31 +36,30 @@ brand-new ``CoverageProfile`` plus a full new set of
 ``CoverageProfileDimension`` rows, never a partial edit.
 
 ``CoverageReviewPass`` is one immutable, retrospective row per reported
-sweep attempt of one document against one dimension, recording how many of
-the document's ``ExtractionUnit``s that pass actually walked.
-``CoverageRecord`` is the append-only state log for a (document, dimension)
-pair -- current state = the most recent row by ``created_at`` -- written
-only once the service layer (``ResearchCoverageService.record_coverage_review_pass``)
-determines cumulative passes have covered the document's entire
+sweep attempt of one document against one dimension, recording exactly
+which contiguous range of the document's current ``ExtractionRun``'s
+``ExtractionUnit``s that pass actually walked. ``CoverageRecord`` is the
+append-only state log for a (document, dimension) pair -- current state =
+the most recent row by ``created_at`` -- written only once the service
+layer (``ResearchCoverageService.record_coverage_review_pass``) merges every
+pass recorded against the document's *current* extraction run as true
+intervals (never a raw sum, which would double-count overlapping or
+re-read pages) and finds their union covers the run's entire
 ``ExtractionUnit`` count for that dimension. This is the mechanical
-tunnel-vision guard: a pass covering only part of a document's units can
-never, by construction, produce a ``CoverageRecord``.
+tunnel-vision guard: a pass covering only part of a document's units --
+or re-reading pages another pass already covered -- can never, by
+construction, produce a ``CoverageRecord``.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 import sqlalchemy as sa
 import sqlalchemy.orm as so
 
-from app import db
 from app.models.base import BaseModel
 from app.models.research_types import enum_type
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class ResearchDimension(BaseModel):
@@ -207,16 +206,32 @@ class CoverageReviewPass(BaseModel):
     """One reported, retrospective sweep attempt of one document against one
     dimension.
 
-    Immutable. Records how many of the document's ``ExtractionUnit``s this
-    pass actually walked (``units_considered_count``), not a caller-supplied
-    claim of completeness -- the service layer is the only place that
-    computes whether cumulative passes close out a ``CoverageRecord``.
+    Immutable. Records exactly which contiguous range of the document's
+    ``ExtractionUnit``s (for one specific ``ExtractionRun``) this pass
+    actually walked -- ``units_considered_min_seq``/``units_considered_max_seq``
+    are required precisely because the completeness guarantee depends on
+    merging these ranges as true intervals, never on trusting a raw
+    caller-supplied count. A pass covering a *non-contiguous* set of pages
+    (e.g. pages 1-10 and 50-60 read in one sitting) must be recorded as two
+    separate calls, one per contiguous chunk -- the service layer rejects a
+    pass whose ``units_considered_count`` does not equal
+    ``units_considered_max_seq - units_considered_min_seq + 1``.
+
+    ``extraction_run_id`` pins a pass to the specific extraction pass it was
+    read against: if a document is later reprocessed under a new
+    ``ExtractionRun`` (a new, independent set of ``ExtractionUnit`` sequence
+    numbers), passes recorded against the old run must never be mixed into
+    the new run's completeness arithmetic -- the service layer only sums
+    passes sharing the document's *current* ``extraction_run_id``.
     """
 
     __tablename__ = "coverage_review_pass"
 
     document_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("document.id"), nullable=False
+    )
+    extraction_run_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("extraction_run.id"), nullable=False
     )
     research_dimension_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("research_dimension.id"), nullable=False
@@ -227,11 +242,11 @@ class CoverageReviewPass(BaseModel):
     units_considered_count: so.Mapped[int] = so.mapped_column(
         sa.Integer, nullable=False
     )
-    units_considered_min_seq: so.Mapped[int | None] = so.mapped_column(
-        sa.Integer, nullable=True
+    units_considered_min_seq: so.Mapped[int] = so.mapped_column(
+        sa.Integer, nullable=False
     )
-    units_considered_max_seq: so.Mapped[int | None] = so.mapped_column(
-        sa.Integer, nullable=True
+    units_considered_max_seq: so.Mapped[int] = so.mapped_column(
+        sa.Integer, nullable=False
     )
     has_material_content: so.Mapped[bool] = so.mapped_column(
         sa.Boolean, nullable=False, default=False, server_default=sa.false()
@@ -241,8 +256,23 @@ class CoverageReviewPass(BaseModel):
     )
     notes: so.Mapped[str | None] = so.mapped_column(sa.Text, nullable=True)
 
+    __table_args__ = (
+        sa.CheckConstraint(
+            "units_considered_max_seq >= units_considered_min_seq",
+            name="ck_coverage_review_pass_seq_range_valid",
+        ),
+        sa.CheckConstraint(
+            "units_considered_count = "
+            "units_considered_max_seq - units_considered_min_seq + 1",
+            name="ck_coverage_review_pass_count_matches_contiguous_range",
+        ),
+    )
+
     document: so.Mapped["Document"] = so.relationship(
         "Document", viewonly=True
+    )
+    extraction_run: so.Mapped["ExtractionRun"] = so.relationship(
+        "ExtractionRun", viewonly=True
     )
     research_dimension: so.Mapped["ResearchDimension"] = so.relationship(
         "ResearchDimension", viewonly=True
@@ -263,19 +293,30 @@ class CoverageReviewPass(BaseModel):
 
 
 class CoverageRecord(BaseModel):
-    """Append-only coverage state for one (document, dimension) pair.
+    """Append-only coverage state for one (document, extraction run,
+    dimension) triple.
 
     Immutable. "Current state" for a given ``(document_id,
-    research_dimension_id)`` pair is the most recent row by ``created_at``
-    -- the same idiom as ``ExtractedFact`` supersession, applied to a state
-    log instead of a value. The absence of any row for a pair already means
-    ``NOT_REVIEWED``; no row is ever written to represent that state.
+    extraction_run_id, research_dimension_id)`` triple is the most recent
+    row by ``created_at`` -- the same idiom as ``ExtractedFact``
+    supersession, applied to a state log instead of a value. The absence of
+    any row for a triple already means ``NOT_REVIEWED``; no row is ever
+    written to represent that state.
+
+    ``extraction_run_id`` matters for the same reason it matters on
+    ``CoverageReviewPass``: if a document is reprocessed under a new run, a
+    closing record against the *old* run must never be read as "this
+    dimension is already covered" for the *new* run's content -- each run
+    gets its own independent completeness history.
     """
 
     __tablename__ = "coverage_record"
 
     document_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("document.id"), nullable=False
+    )
+    extraction_run_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("extraction_run.id"), nullable=False
     )
     research_dimension_id: so.Mapped[str] = so.mapped_column(
         sa.ForeignKey("research_dimension.id"), nullable=False
@@ -293,6 +334,9 @@ class CoverageRecord(BaseModel):
 
     document: so.Mapped["Document"] = so.relationship(
         "Document", viewonly=True
+    )
+    extraction_run: so.Mapped["ExtractionRun"] = so.relationship(
+        "ExtractionRun", viewonly=True
     )
     research_dimension: so.Mapped["ResearchDimension"] = so.relationship(
         "ResearchDimension", viewonly=True

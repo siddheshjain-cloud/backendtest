@@ -2,24 +2,29 @@
 
 Mirrors ``ResearchBrainService``'s transactional shape exactly: each write
 method is one atomic commit (explicit ``db.session.add``/``flush``/
-``commit``, rolled back whole on any failure). The one business rule that
-cannot be expressed as a single-table database constraint --
-``record_coverage_review_pass``'s completeness check -- is enforced here in
-code, the same style ``record_fact``'s "at least one evidence" rule already
-uses.
+``commit``, rolled back whole on any failure). The business rules that
+cannot be expressed as single-table database constraints --
+``record_coverage_review_pass``'s completeness check and its "no duplicate
+closing record" invariant -- are enforced here in code, the same style
+``record_fact``'s "at least one evidence" rule already uses.
 
 ``record_coverage_review_pass`` is a deliberate, approved collapse of the
 design proposal's two-step ``open_review_pass``/``record_review_pass_result``
 into one atomic call: a review pass is realistically reported as one
 retrospective "I read X, here's what I found" statement, not a long-running
-session that needs opening in advance. In one transaction it (a) inserts
-the ``CoverageReviewPass`` row, (b) reads the document's true total
+session that needs opening in advance. In one transaction it (a) resolves
+the document's *current* ``ExtractionRun`` and inserts the
+``CoverageReviewPass`` row pinned to it, (b) reads that run's true total
 ``ExtractionUnit`` count directly (never trusting a caller-supplied total),
-(c) sums ``units_considered_count`` across every ``CoverageReviewPass`` ever
-recorded for that exact ``(document_id, research_dimension_id)`` pair, and
-(d) writes a ``CoverageRecord`` only if that sum has reached the true total
--- the mechanical guard against "narrow-task tunnel vision" the whole
-capability exists to build.
+(c) merges every pass ever recorded for that exact ``(document_id,
+extraction_run_id, research_dimension_id)`` triple as true integer
+intervals -- never a raw sum, which would silently double-count a
+re-read or overlapping range -- and (d) writes a ``CoverageRecord`` only if
+that merged union has reached the true total, and only if one does not
+already exist for the pair. This is the mechanical guard against
+"narrow-task tunnel vision" the whole capability exists to build; a pass
+covering only part of a document, or re-reading pages already covered,
+can never, by construction, produce a false completion.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import sqlalchemy.orm as so
 
 from app import db
 from app.models.document import Document, DocumentCompanyLink
-from app.models.research_brain import ExtractionUnit
+from app.models.research_brain import ExtractionRun, ExtractionUnit
 from app.models.research_coverage import (
     CoverageDocumentSubtype,
     CoverageProfile,
@@ -41,6 +46,33 @@ from app.models.research_coverage import (
     ResearchDimension,
 )
 from app.utils.research_errors import ResearchValidationError
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping/adjacent ``[min_seq, max_seq]`` integer intervals.
+
+    This is what makes the completeness check correct under re-reads and
+    overlaps: two passes covering pages 1-10 and 6-15 merge into one 1-15
+    interval (10 genuinely-new pages, not 10 + 10 = 20 double-counted ones).
+    """
+
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _union_length(intervals: list[tuple[int, int]]) -> int:
+    """Total distinct units covered by a set of intervals, after merging."""
+
+    return sum(end - start + 1 for start, end in _merge_intervals(intervals))
 
 
 class ResearchCoverageService:
@@ -150,30 +182,42 @@ class ResearchCoverageService:
         return profile
 
     @classmethod
-    def get_active_profile(cls, document_type_code: str) -> CoverageProfile | None:
-        """The current (non-superseded) profile for a ``document_type_code``.
+    def get_active_profile(
+        cls, document_type_code: str, *, as_of: date | None = None
+    ) -> CoverageProfile | None:
+        """The profile actually governing lookups for a ``document_type_code``
+        as of a given date (default: today).
 
-        "Current" = the row not referenced by any other row's
-        ``supersedes_profile_id``, same idiom as ``ExtractedFact``.
+        "Active" = the already-effective row (``effective_from <= as_of``)
+        with the latest ``effective_from`` (ties broken by ``created_at``).
+        Deliberately does *not* filter by whether a row is referenced by
+        another row's ``supersedes_profile_id``: a future-dated revision
+        correctly records its lineage via ``supersedes_profile_id`` the
+        moment it is inserted, but must not make the *still-current* prior
+        revision disappear from "active" lookups before its own
+        ``effective_from`` arrives. ``supersedes_profile_id`` is lineage/
+        audit history, not a second activation gate on top of
+        ``effective_from``.
         """
 
-        superseded_ids = sa.select(CoverageProfile.supersedes_profile_id).where(
-            CoverageProfile.supersedes_profile_id.is_not(None)
-        )
+        as_of = as_of if as_of is not None else date.today()
 
         return db.session.scalars(
             sa.select(CoverageProfile)
             .where(
                 CoverageProfile.document_type_code == document_type_code,
-                CoverageProfile.id.not_in(superseded_ids),
+                CoverageProfile.effective_from <= as_of,
             )
-            .order_by(CoverageProfile.effective_from.desc())
+            .order_by(
+                CoverageProfile.effective_from.desc(),
+                CoverageProfile.created_at.desc(),
+            )
             .limit(1)
         ).first()
 
     @classmethod
-    def get_required_dimensions(cls, document_id: str) -> list[ResearchDimension]:
-        """Resolve a document's required dimensions via its active profile.
+    def _resolve_document_type_code(cls, document_id: str) -> tuple[Document, str]:
+        """The ``Document`` row plus its resolved ``document_type_code``.
 
         Precedence: if a ``CoverageDocumentSubtype`` tag exists for the
         document, its ``subtype_code`` is used as the ``document_type_code``
@@ -181,7 +225,8 @@ class ResearchCoverageService:
         ``Document.document_type`` -- a document explicitly tagged (e.g. as
         a DRHP) should use that profile even though its native
         ``document_type`` may sit at ``OTHER``. Otherwise the native
-        ``document_type`` value is used directly.
+        ``document_type`` value is used directly. Single shared resolution
+        so this precedence rule lives in exactly one place.
         """
 
         document = db.session.get(Document, document_id)
@@ -194,6 +239,13 @@ class ResearchCoverageService:
         document_type_code = (
             subtype.subtype_code if subtype is not None else document.document_type
         )
+        return document, document_type_code
+
+    @classmethod
+    def get_required_dimensions(cls, document_id: str) -> list[ResearchDimension]:
+        """Resolve a document's required dimensions via its active profile."""
+
+        _document, document_type_code = cls._resolve_document_type_code(document_id)
 
         profile = cls.get_active_profile(document_type_code)
         if profile is None:
@@ -216,6 +268,36 @@ class ResearchCoverageService:
     # -----------------------------------------------------------------
 
     @classmethod
+    def _resolve_current_run_id(
+        cls, document_id: str, *, for_update: bool = False
+    ) -> str | None:
+        """The most recent ``ExtractionRun`` for this document that
+        actually has at least one ``ExtractionUnit`` -- not merely the most
+        recently-created row. Real corpora can carry empty, abandoned
+        ``ExtractionRun`` rows (e.g. an ingestion attempt superseded before
+        any unit was recorded); picking the latest row by ``created_at``
+        alone, with no units, would silently and permanently block
+        completeness (its unit count is 0) even though a prior run holds
+        the document's real, fully-captured text.
+        """
+
+        query = (
+            sa.select(ExtractionRun.id)
+            .join(
+                ExtractionUnit,
+                ExtractionUnit.extraction_run_id == ExtractionRun.id,
+            )
+            .where(ExtractionRun.document_id == document_id)
+            .group_by(ExtractionRun.id)
+            .having(sa.func.count(ExtractionUnit.id) > 0)
+            .order_by(ExtractionRun.created_at.desc())
+            .limit(1)
+        )
+        if for_update:
+            query = query.with_for_update()
+        return db.session.scalar(query)
+
+    @classmethod
     def record_coverage_review_pass(
         cls,
         *,
@@ -223,26 +305,70 @@ class ResearchCoverageService:
         research_dimension_id: str,
         performed_by_user_id: str,
         units_considered_count: int,
-        units_considered_min_seq: int | None = None,
-        units_considered_max_seq: int | None = None,
+        units_considered_min_seq: int,
+        units_considered_max_seq: int,
         has_material_content: bool = False,
         notes: str | None = None,
         coverage_profile_id: str | None = None,
     ) -> CoverageReviewPass:
-        """Record one complete, immutable review pass and, if cumulative
-        coverage for this ``(document_id, research_dimension_id)`` pair is
-        now complete, close it with a ``CoverageRecord`` -- all in one
-        transaction.
+        """Record one complete, immutable review pass and, if the merged
+        union of every pass recorded against the document's *current*
+        extraction run for this ``(document_id, research_dimension_id)``
+        pair now covers that run's entire ``ExtractionUnit`` count, close
+        it with a ``CoverageRecord`` -- all in one transaction.
 
-        A pass covering only part of a document's units can never produce a
-        ``CoverageRecord``: the completeness comparison is always against
-        the document's true ``ExtractionUnit`` count, read fresh from the
-        database, never a caller-supplied total.
+        ``units_considered_min_seq``/``units_considered_max_seq`` must
+        describe one contiguous range whose length equals
+        ``units_considered_count``; a non-contiguous sweep (e.g. pages 1-10
+        and 50-60 read in one sitting) must be recorded as two separate
+        calls, one per contiguous chunk -- this is what lets completeness be
+        computed as a true interval union instead of a raw, double-counting
+        sum. A pass covering only part of a run's units -- or one that only
+        re-reads pages another pass already covered -- can never produce a
+        ``CoverageRecord``. If the pair is already closed, this call still
+        records the new pass (for audit purposes) but never inserts a
+        second, redundant ``CoverageRecord``.
         """
 
+        if units_considered_max_seq < units_considered_min_seq:
+            raise ResearchValidationError(
+                {
+                    "units_considered_max_seq": [
+                        "Must be >= units_considered_min_seq"
+                    ]
+                }
+            )
+        expected_count = (
+            units_considered_max_seq - units_considered_min_seq + 1
+        )
+        if units_considered_count != expected_count:
+            raise ResearchValidationError(
+                {
+                    "units_considered_count": [
+                        f"Must equal max_seq - min_seq + 1 ({expected_count}) "
+                        "for a contiguous range -- record a non-contiguous "
+                        "sweep as separate calls, one per contiguous chunk"
+                    ]
+                }
+            )
+
         try:
+            current_run_id = cls._resolve_current_run_id(
+                document_id, for_update=True
+            )
+            if current_run_id is None:
+                raise ResearchValidationError(
+                    {
+                        "document_id": [
+                            "Document has no ExtractionRun with any "
+                            "recorded ExtractionUnit yet"
+                        ]
+                    }
+                )
+
             review_pass = CoverageReviewPass(
                 document_id=document_id,
+                extraction_run_id=current_run_id,
                 research_dimension_id=research_dimension_id,
                 coverage_profile_id=coverage_profile_id,
                 units_considered_count=units_considered_count,
@@ -257,26 +383,47 @@ class ResearchCoverageService:
 
             total_units = db.session.scalar(
                 sa.select(sa.func.count(ExtractionUnit.id)).where(
-                    ExtractionUnit.document_id == document_id
+                    ExtractionUnit.document_id == document_id,
+                    ExtractionUnit.extraction_run_id == current_run_id,
                 )
             )
 
+            # Lock existing passes for this pair+run before deciding whether
+            # to close it, so two concurrent submissions can't both read
+            # "not yet closed" and both insert a closing CoverageRecord.
             passes_for_pair = db.session.scalars(
-                sa.select(CoverageReviewPass).where(
+                sa.select(CoverageReviewPass)
+                .where(
                     CoverageReviewPass.document_id == document_id,
+                    CoverageReviewPass.extraction_run_id == current_run_id,
                     CoverageReviewPass.research_dimension_id
                     == research_dimension_id,
                 )
+                .with_for_update()
             ).all()
 
-            cumulative_units_considered = sum(
-                p.units_considered_count for p in passes_for_pair
+            covered_units = _union_length(
+                [
+                    (p.units_considered_min_seq, p.units_considered_max_seq)
+                    for p in passes_for_pair
+                ]
             )
             any_material_content = any(
                 p.has_material_content for p in passes_for_pair
             )
 
-            if total_units > 0 and cumulative_units_considered >= total_units:
+            already_closed = (
+                research_dimension_id
+                in cls._current_coverage_records(
+                    document_id, extraction_run_id=current_run_id
+                )
+            )
+
+            if (
+                not already_closed
+                and total_units > 0
+                and covered_units >= total_units
+            ):
                 state = (
                     "FINDING_GENERATED"
                     if any_material_content
@@ -285,6 +432,7 @@ class ResearchCoverageService:
                 db.session.add(
                     CoverageRecord(
                         document_id=document_id,
+                        extraction_run_id=current_run_id,
                         research_dimension_id=research_dimension_id,
                         state=state,
                         review_pass_id=review_pass.id,
@@ -299,15 +447,33 @@ class ResearchCoverageService:
         return review_pass
 
     @classmethod
-    def _current_coverage_records(cls, document_id: str) -> dict[str, CoverageRecord]:
+    def _current_coverage_records(
+        cls, document_id: str, *, extraction_run_id: str | None = None
+    ) -> dict[str, CoverageRecord]:
         """Map ``research_dimension_id`` -> its most recent ``CoverageRecord``
-        row for a document (there is at most one, by construction, since
-        once a record closes a dimension no further record is ever written
-        for that pair in this slice)."""
+        row for a document, scoped to one ``extraction_run_id`` (there is at
+        most one per dimension within a single run, by construction, since
+        once a record closes a dimension for that run no further record is
+        ever written for that (run, dimension) pair in this slice).
+
+        If ``extraction_run_id`` is omitted, it resolves to the document's
+        current run (the same resolution ``record_coverage_review_pass``
+        uses) -- a closing record against a now-superseded run must never
+        be read as "this dimension is covered" for the document's current
+        content.
+        """
+
+        if extraction_run_id is None:
+            extraction_run_id = cls._resolve_current_run_id(document_id)
+            if extraction_run_id is None:
+                return {}
 
         rows = db.session.scalars(
             sa.select(CoverageRecord)
-            .where(CoverageRecord.document_id == document_id)
+            .where(
+                CoverageRecord.document_id == document_id,
+                CoverageRecord.extraction_run_id == extraction_run_id,
+            )
             .order_by(CoverageRecord.created_at.desc())
         ).all()
 
@@ -318,10 +484,11 @@ class ResearchCoverageService:
 
     @classmethod
     def get_document_dimension_coverage(cls, document_id: str) -> dict[str, str]:
-        """Dimension code -> current state for every required dimension.
+        """Dimension code -> current state for every required dimension,
+        scoped to the document's current ``ExtractionRun``.
 
         ``NOT_REVIEWED`` for any required dimension with no ``CoverageRecord``
-        row yet.
+        row yet for that run.
         """
 
         required_dimensions = cls.get_required_dimensions(document_id)
@@ -335,15 +502,8 @@ class ResearchCoverageService:
 
     @classmethod
     def get_document_coverage_status(cls, document_id: str) -> dict:
-        document = db.session.get(Document, document_id)
-        if document is None:
-            raise ResearchValidationError(
-                {"document_id": ["Document not found"]}
-            )
-
-        subtype = cls._current_subtype(document_id)
-        document_type_code = (
-            subtype.subtype_code if subtype is not None else document.document_type
+        _document, document_type_code = cls._resolve_document_type_code(
+            document_id
         )
 
         dimensions = cls.get_document_dimension_coverage(document_id)

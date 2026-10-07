@@ -3,17 +3,21 @@
 
 Covers dimension resolution precedence (native ``document_type`` vs.
 ``CoverageDocumentSubtype`` override), the mandatory, adversarial
-completeness-rule test for ``record_coverage_review_pass`` (a pass covering
-only part of a document's units must never produce a ``CoverageRecord``),
-the material-content-sticks-through-partial-passes rule, and the
-``get_document_coverage_status`` rollup logic.
+completeness-rule tests for ``record_coverage_review_pass`` (a pass covering
+only part of a document's units must never produce a ``CoverageRecord``;
+overlapping/re-read passes must not be double-counted; a closed pair must
+never receive a second ``CoverageRecord``), the material-content-sticks-
+through-partial-passes rule, profile effective-dating, extraction-run
+scoping after reprocessing, and the ``get_document_coverage_status`` rollup
+logic.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
+import sqlalchemy as sa
 
 from app import db
 from app.models import Company
@@ -25,9 +29,15 @@ from app.models.document import (
     IngestionStatus,
     SourceAccess,
 )
+from app.models.research_coverage import CoverageRecord, CoverageReviewPass
 from app.services.document_library_service import DocumentLibraryService
 from app.services.research_brain_service import ResearchBrainService
-from app.services.research_coverage_service import ResearchCoverageService
+from app.services.research_coverage_service import (
+    ResearchCoverageService,
+    _merge_intervals,
+    _union_length,
+)
+from app.utils.research_errors import ResearchValidationError
 
 
 @pytest.fixture
@@ -100,20 +110,29 @@ def _two_dimensions():
     return governance, corporate
 
 
-def _make_profile(admin_user, document_type_code, dimensions, *, required_codes):
+def _make_profile(
+    admin_user,
+    document_type_code,
+    dimensions,
+    *,
+    required_codes,
+    effective_from=date(2026, 10, 7),
+    supersedes_profile_id=None,
+):
     requirements = [
         (dim.id, dim.code in required_codes, None) for dim in dimensions
     ]
     return ResearchCoverageService.create_coverage_profile(
         document_type_code=document_type_code,
         dimension_requirements=requirements,
-        effective_from=date(2026, 10, 7),
+        effective_from=effective_from,
         created_by_user_id=admin_user.id,
+        supersedes_profile_id=supersedes_profile_id,
     )
 
 
-def _extraction_units(admin_user, document, count: int):
-    run = ResearchBrainService.create_extraction_run(
+def _extraction_units(admin_user, document, count: int, *, run=None):
+    run = run or ResearchBrainService.create_extraction_run(
         document_id=document.id,
         method="manual_pilot",
         extracted_by_user_id=admin_user.id,
@@ -130,7 +149,16 @@ def _extraction_units(admin_user, document, count: int):
                 created_by_user_id=admin_user.id,
             )
         )
-    return units
+    return run, units
+
+
+def _coverage_records(document_id, dimension_id):
+    return db.session.scalars(
+        sa.select(CoverageRecord).where(
+            CoverageRecord.document_id == document_id,
+            CoverageRecord.research_dimension_id == dimension_id,
+        )
+    ).all()
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +242,60 @@ def test_subtype_tag_takes_precedence_over_native_type(
 
 
 # ---------------------------------------------------------------------------
-# The mandatory, adversarial completeness-rule test
+# Interval-merge helpers (pure functions, no DB)
+# ---------------------------------------------------------------------------
+
+
+def test_merge_intervals_merges_overlapping_and_adjacent_ranges():
+    assert _merge_intervals([(1, 10), (6, 15)]) == [(1, 15)]
+    assert _merge_intervals([(1, 5), (6, 10)]) == [(1, 10)]
+    assert _merge_intervals([(1, 5), (20, 30)]) == [(1, 5), (20, 30)]
+    assert _merge_intervals([(20, 30), (1, 5)]) == [(1, 5), (20, 30)]
+
+
+def test_union_length_does_not_double_count_overlap():
+    assert _union_length([(1, 10), (6, 15)]) == 15
+    assert _union_length([(1, 10), (1, 10)]) == 10
+    assert _union_length([(1, 5), (10, 15)]) == 11
+
+
+# ---------------------------------------------------------------------------
+# record_coverage_review_pass: contiguous-range validation
+# ---------------------------------------------------------------------------
+
+
+def test_non_contiguous_range_is_rejected(app, admin_user, quarterly_document):
+    governance, _ = _two_dimensions()
+    _extraction_units(admin_user, quarterly_document, count=10)
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.record_coverage_review_pass(
+            document_id=quarterly_document.id,
+            research_dimension_id=governance.id,
+            performed_by_user_id=admin_user.id,
+            units_considered_count=37,
+            units_considered_min_seq=1,
+            units_considered_max_seq=482,
+        )
+
+
+def test_inverted_range_is_rejected(app, admin_user, quarterly_document):
+    governance, _ = _two_dimensions()
+    _extraction_units(admin_user, quarterly_document, count=10)
+
+    with pytest.raises(ResearchValidationError):
+        ResearchCoverageService.record_coverage_review_pass(
+            document_id=quarterly_document.id,
+            research_dimension_id=governance.id,
+            performed_by_user_id=admin_user.id,
+            units_considered_count=3,
+            units_considered_min_seq=5,
+            units_considered_max_seq=3,
+        )
+
+
+# ---------------------------------------------------------------------------
+# The mandatory, adversarial completeness-rule tests
 # ---------------------------------------------------------------------------
 
 
@@ -233,22 +314,7 @@ def test_partial_pass_never_produces_a_coverage_record(
         units_considered_max_seq=3,
     )
 
-    coverage = ResearchCoverageService.get_document_dimension_coverage(
-        quarterly_document.id
-    )
-    # GOVERNANCE_RPT isn't a required dimension of any seeded profile here,
-    # so exercise the completeness rule directly via the review passes and
-    # the records table instead of the required-dimensions-only coverage map.
-    from app.models.research_coverage import CoverageRecord
-    import sqlalchemy as sa
-
-    records = db.session.scalars(
-        sa.select(CoverageRecord).where(
-            CoverageRecord.document_id == quarterly_document.id,
-            CoverageRecord.research_dimension_id == governance.id,
-        )
-    ).all()
-    assert records == []
+    assert _coverage_records(quarterly_document.id, governance.id) == []
 
 
 def test_cumulative_passes_close_coverage_once_total_is_reached(
@@ -262,35 +328,102 @@ def test_cumulative_passes_close_coverage_once_total_is_reached(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=3,
+        units_considered_min_seq=1,
+        units_considered_max_seq=3,
     )
-
-    from app.models.research_coverage import CoverageRecord
-    import sqlalchemy as sa
-
-    records_after_partial = db.session.scalars(
-        sa.select(CoverageRecord).where(
-            CoverageRecord.document_id == quarterly_document.id,
-            CoverageRecord.research_dimension_id == governance.id,
-        )
-    ).all()
-    assert records_after_partial == []
+    assert _coverage_records(quarterly_document.id, governance.id) == []
 
     second_pass = ResearchCoverageService.record_coverage_review_pass(
         document_id=quarterly_document.id,
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=7,
+        units_considered_min_seq=4,
+        units_considered_max_seq=10,
     )
 
-    records_after_complete = db.session.scalars(
-        sa.select(CoverageRecord).where(
-            CoverageRecord.document_id == quarterly_document.id,
-            CoverageRecord.research_dimension_id == governance.id,
-        )
-    ).all()
+    records_after_complete = _coverage_records(
+        quarterly_document.id, governance.id
+    )
     assert len(records_after_complete) == 1
     assert records_after_complete[0].state == "REVIEWED_NO_FINDING"
     assert records_after_complete[0].review_pass_id == second_pass.id
+
+
+def test_overlapping_passes_are_not_double_counted(
+    app, admin_user, quarterly_document
+):
+    """The bug the code review caught: re-reading pages 1-6 after already
+    reading 1-6 must not let 6+6=12 >= 10 falsely close a 10-unit document."""
+
+    governance, _ = _two_dimensions()
+    _extraction_units(admin_user, quarterly_document, count=10)
+
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=6,
+        units_considered_min_seq=1,
+        units_considered_max_seq=6,
+    )
+    # Re-read the same first six pages again -- genuinely re-read, but zero
+    # NEW pages. Raw counts would sum to 12 >= 10 and wrongly close this.
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=6,
+        units_considered_min_seq=1,
+        units_considered_max_seq=6,
+    )
+    assert _coverage_records(quarterly_document.id, governance.id) == []
+
+    # Now genuinely cover the remaining, never-before-seen pages 7-10.
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=4,
+        units_considered_min_seq=7,
+        units_considered_max_seq=10,
+    )
+    records = _coverage_records(quarterly_document.id, governance.id)
+    assert len(records) == 1
+    assert records[0].state == "REVIEWED_NO_FINDING"
+
+
+def test_closing_the_pair_twice_never_inserts_a_second_coverage_record(
+    app, admin_user, quarterly_document
+):
+    """The bug the code review caught: once closed, a later legitimate pass
+    for the same pair must not insert a redundant second CoverageRecord."""
+
+    governance, _ = _two_dimensions()
+    _extraction_units(admin_user, quarterly_document, count=10)
+
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=10,
+        units_considered_min_seq=1,
+        units_considered_max_seq=10,
+    )
+    assert len(_coverage_records(quarterly_document.id, governance.id)) == 1
+
+    # A later, legitimate re-confirmation pass over the same, already-closed
+    # pair must not create a second CoverageRecord.
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=10,
+        units_considered_min_seq=1,
+        units_considered_max_seq=10,
+    )
+    records = _coverage_records(quarterly_document.id, governance.id)
+    assert len(records) == 1
 
 
 def test_material_content_on_any_partial_pass_produces_finding_generated(
@@ -304,6 +437,8 @@ def test_material_content_on_any_partial_pass_produces_finding_generated(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=4,
+        units_considered_min_seq=1,
+        units_considered_max_seq=4,
         has_material_content=True,
         notes="Found an RPT disclosure in pages 1-4.",
     )
@@ -312,6 +447,8 @@ def test_material_content_on_any_partial_pass_produces_finding_generated(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=3,
+        units_considered_min_seq=5,
+        units_considered_max_seq=7,
         has_material_content=False,
     )
     ResearchCoverageService.record_coverage_review_pass(
@@ -319,18 +456,12 @@ def test_material_content_on_any_partial_pass_produces_finding_generated(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=3,
+        units_considered_min_seq=8,
+        units_considered_max_seq=10,
         has_material_content=False,
     )
 
-    from app.models.research_coverage import CoverageRecord
-    import sqlalchemy as sa
-
-    records = db.session.scalars(
-        sa.select(CoverageRecord).where(
-            CoverageRecord.document_id == quarterly_document.id,
-            CoverageRecord.research_dimension_id == governance.id,
-        )
-    ).all()
+    records = _coverage_records(quarterly_document.id, governance.id)
     assert len(records) == 1
     assert records[0].state == "FINDING_GENERATED"
 
@@ -360,6 +491,8 @@ def test_get_document_dimension_coverage_reports_not_reviewed_until_closed(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=5,
+        units_considered_min_seq=1,
+        units_considered_max_seq=5,
     )
 
     coverage = ResearchCoverageService.get_document_dimension_coverage(
@@ -369,6 +502,104 @@ def test_get_document_dimension_coverage_reports_not_reviewed_until_closed(
         "GOVERNANCE_RPT": "REVIEWED_NO_FINDING",
         "CORPORATE_STRUCTURE_MA": "NOT_REVIEWED",
     }
+
+
+# ---------------------------------------------------------------------------
+# ExtractionRun scoping: reprocessing starts a fresh completeness target
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_is_scoped_to_the_documents_current_extraction_run(
+    app, admin_user, quarterly_document
+):
+    governance, _ = _two_dimensions()
+    first_run, _ = _extraction_units(admin_user, quarterly_document, count=5)
+
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=5,
+        units_considered_min_seq=1,
+        units_considered_max_seq=5,
+    )
+    assert len(_coverage_records(quarterly_document.id, governance.id)) == 1
+
+    # Reprocess the document under a brand-new ExtractionRun with a
+    # different number of units -- explicitly supported per ExtractionUnit's
+    # own docstring. The old run's pass must not count toward the new run's
+    # completeness target, and the old CoverageRecord is untouched history.
+    second_run, _ = _extraction_units(
+        admin_user, quarterly_document, count=8
+    )
+    assert second_run.id != first_run.id
+
+    pass_against_new_run = ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=5,
+        units_considered_min_seq=1,
+        units_considered_max_seq=5,
+    )
+    assert pass_against_new_run.extraction_run_id == second_run.id
+
+    # Still only the one, original CoverageRecord -- 5 of 8 new-run units
+    # considered is not complete, regardless of the old run's closed pass.
+    records = _coverage_records(quarterly_document.id, governance.id)
+    assert len(records) == 1
+
+    ResearchCoverageService.record_coverage_review_pass(
+        document_id=quarterly_document.id,
+        research_dimension_id=governance.id,
+        performed_by_user_id=admin_user.id,
+        units_considered_count=3,
+        units_considered_min_seq=6,
+        units_considered_max_seq=8,
+    )
+    records = _coverage_records(quarterly_document.id, governance.id)
+    assert len(records) == 2
+
+
+# ---------------------------------------------------------------------------
+# CoverageProfile effective-dating
+# ---------------------------------------------------------------------------
+
+
+def test_future_dated_profile_does_not_take_effect_immediately(
+    app, admin_user, quarterly_document
+):
+    governance, corporate = _two_dimensions()
+    old_profile = _make_profile(
+        admin_user,
+        "QUARTERLY_RESULTS",
+        [governance, corporate],
+        required_codes={"GOVERNANCE_RPT"},
+        effective_from=date(2026, 1, 1),
+    )
+
+    future_profile = _make_profile(
+        admin_user,
+        "QUARTERLY_RESULTS",
+        [governance, corporate],
+        required_codes={"CORPORATE_STRUCTURE_MA"},
+        effective_from=date.today() + timedelta(days=30),
+        supersedes_profile_id=old_profile.id,
+    )
+
+    # The old profile is technically "superseded" by the future one, but the
+    # future one isn't effective yet -- lookups must still see the old
+    # profile's requirements today.
+    required = ResearchCoverageService.get_required_dimensions(
+        quarterly_document.id
+    )
+    assert {d.code for d in required} == {"GOVERNANCE_RPT"}
+
+    # Once the future date actually arrives, the new profile governs.
+    required_later = ResearchCoverageService.get_active_profile(
+        "QUARTERLY_RESULTS", as_of=date.today() + timedelta(days=31)
+    )
+    assert required_later.id == future_profile.id
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +630,8 @@ def test_document_coverage_status_rollup_not_started_in_progress_fully_swept(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=4,
+        units_considered_min_seq=1,
+        units_considered_max_seq=4,
     )
 
     status = ResearchCoverageService.get_document_coverage_status(
@@ -411,6 +644,8 @@ def test_document_coverage_status_rollup_not_started_in_progress_fully_swept(
         research_dimension_id=corporate.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=4,
+        units_considered_min_seq=1,
+        units_considered_max_seq=4,
         has_material_content=True,
     )
 
@@ -445,6 +680,8 @@ def test_company_coverage_summary_rolls_up_across_documents(
         research_dimension_id=governance.id,
         performed_by_user_id=admin_user.id,
         units_considered_count=2,
+        units_considered_min_seq=1,
+        units_considered_max_seq=2,
     )
 
     summary = ResearchCoverageService.get_company_coverage_summary(company.id)
