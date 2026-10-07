@@ -46,6 +46,9 @@ from .research_coverage import (
     CoverageReviewPass,
     FactDerivation,
     FactDerivationInput,
+    PropositionLink,
+    PropositionStageType,
     ResearchDimension,
+    ResearchProposition,
 )
 from .utils import *

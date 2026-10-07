@@ -1,7 +1,7 @@
-"""Research Coverage & Fact Intelligence, Slices 1-3: Coverage Foundation,
-Candidate Findings, and Derived Facts.
+"""Research Coverage & Fact Intelligence, Slices 1-4: Coverage Foundation,
+Candidate Findings, Derived Facts, and Longitudinal Proposition Linkage.
 
-Ten purely additive models, independent of the frozen Milestone 1 schema
+Thirteen purely additive models, independent of the frozen Milestone 1 schema
 (``migrations/m1_table_inventory.py``'s ``M1_TABLES``) and of the Research
 Brain Pilot's own two frozen sets (``RESEARCH_BRAIN_PILOT_TABLES``,
 ``RESEARCH_BRAIN_EXTRACTION_UNIT_TABLES``). This slice is the "accounting
@@ -71,6 +71,16 @@ through the same unchanged ``record_fact`` call as any other Fact, and
 ``FactDerivation`` is purely additional metadata recorded alongside it via
 ``ResearchCoverageService.record_fact_derivation``, naming the formula and
 citing each raw input as either an existing Fact or a raw ``Evidence`` row.
+
+Slice 4 adds ``ResearchProposition``/``PropositionStageType``/
+``PropositionLink`` -- a thread tracking one underlying claim or
+commitment as it evolves across documents and time (e.g. a capacity
+commitment: promised -> committed -> capex deployed -> commissioned ->
+utilization ramp -> earnings impact). A ``PropositionLink`` always points
+at something already evidence-backed -- an existing ``ExtractedFact`` or
+``CandidateFinding`` -- never a bare narrative claim; linking a stage is a
+deliberate, reviewer-initiated act, with no automated matching of new
+findings to existing propositions.
 """
 
 from __future__ import annotations
@@ -642,6 +652,147 @@ class FactDerivationInput(BaseModel):
         )
 
 
+class ResearchProposition(BaseModel):
+    """Slice 4: a longitudinal thread -- a single underlying claim or
+    commitment tracked as it evolves across documents and time (e.g. a
+    capacity commitment: promised -> committed -> capex deployed ->
+    commissioned -> utilization ramp -> earnings impact).
+
+    Immutable. Scoped to one company. Creation and stage-linking are
+    always a deliberate, reviewer-initiated act -- there is no automated
+    matching of "this new Fact probably belongs to that existing
+    proposition," consistent with the "no ML" non-goal and with
+    ``GovernanceFlag``'s existing "never inferred, always attributed"
+    discipline.
+    """
+
+    __tablename__ = "research_proposition"
+
+    company_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("company.id"), nullable=False
+    )
+    title: so.Mapped[str] = so.mapped_column(sa.String(200), nullable=False)
+    description: so.Mapped[str | None] = so.mapped_column(
+        sa.Text, nullable=True
+    )
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    company: so.Mapped["Company"] = so.relationship(
+        "Company", viewonly=True
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+    links: so.Mapped[list["PropositionLink"]] = so.relationship(
+        "PropositionLink", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<ResearchProposition {self.title!r}>"
+
+
+class PropositionStageType(BaseModel):
+    """Slice 4: a named stage a proposition can pass through (e.g.
+    ``PROMISED``, ``COMMITTED``, ``CAPEX_DEPLOYED``, ``COMMISSIONED``,
+    ``UTILIZATION_RAMP``, ``EARNINGS_IMPACT``).
+
+    Seed/lookup table, same idiom as ``ResearchDimension``: new stages are
+    a data insert, never a migration.
+    """
+
+    __tablename__ = "proposition_stage_type"
+
+    code: so.Mapped[str] = so.mapped_column(
+        sa.String(50), nullable=False, unique=True
+    )
+    name: so.Mapped[str] = so.mapped_column(sa.String(100), nullable=False)
+    description: so.Mapped[str] = so.mapped_column(sa.Text, nullable=False)
+    is_active: so.Mapped[bool] = so.mapped_column(
+        sa.Boolean, nullable=False, default=True, server_default=sa.true()
+    )
+
+    def __repr__(self) -> str:
+        return f"<PropositionStageType {self.code}>"
+
+
+class PropositionLink(BaseModel):
+    """Slice 4: one stage of one proposition, attached to something
+    already evidence-backed -- never a bare narrative claim.
+
+    Immutable. Exactly one of ``fact_id``/``candidate_finding_id`` is set
+    (NULL-safe ``IS NOT NULL`` comparison on both sides, the same pattern
+    ``FactDerivationInput`` uses -- never a bare equality against a
+    nullable column's value). ``document_id`` is denormalized for fast
+    timeline queries; the service layer requires it to be one of the
+    linked Fact's actual evidence documents (or the candidate's own
+    document), not an arbitrary, unrelated document.
+    """
+
+    __tablename__ = "proposition_link"
+
+    proposition_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("research_proposition.id"), nullable=False
+    )
+    stage_type_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("proposition_stage_type.id"), nullable=False
+    )
+    fact_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("extracted_fact.id"), nullable=True
+    )
+    candidate_finding_id: so.Mapped[str | None] = so.mapped_column(
+        sa.ForeignKey("candidate_finding.id"), nullable=True
+    )
+    document_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("document.id"), nullable=False
+    )
+    as_of_date: so.Mapped[date | None] = so.mapped_column(
+        sa.Date, nullable=True
+    )
+    period: so.Mapped[str | None] = so.mapped_column(
+        sa.String(50), nullable=True
+    )
+    stage_note: so.Mapped[str | None] = so.mapped_column(
+        sa.Text, nullable=True
+    )
+    created_by_user_id: so.Mapped[str] = so.mapped_column(
+        sa.ForeignKey("user.id"), nullable=False
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "(fact_id IS NOT NULL) != (candidate_finding_id IS NOT NULL)",
+            name="ck_proposition_link_exactly_one_source",
+        ),
+    )
+
+    proposition: so.Mapped["ResearchProposition"] = so.relationship(
+        "ResearchProposition", viewonly=True
+    )
+    stage_type: so.Mapped["PropositionStageType"] = so.relationship(
+        "PropositionStageType", viewonly=True
+    )
+    fact: so.Mapped["ExtractedFact | None"] = so.relationship(
+        "ExtractedFact", viewonly=True
+    )
+    candidate_finding: so.Mapped["CandidateFinding | None"] = so.relationship(
+        "CandidateFinding", viewonly=True
+    )
+    document: so.Mapped["Document"] = so.relationship(
+        "Document", viewonly=True
+    )
+    created_by_user: so.Mapped["User"] = so.relationship(
+        "User", viewonly=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PropositionLink proposition={self.proposition_id} "
+            f"stage={self.stage_type_id}>"
+        )
+
+
 def _reject_immutable_update(_mapper, _connection, target) -> None:
     raise sa.exc.InvalidRequestError(
         f"{type(target).__name__} is immutable after insertion"
@@ -665,6 +816,9 @@ for _immutable_model in (
     CandidateFindingDecision,
     FactDerivation,
     FactDerivationInput,
+    ResearchProposition,
+    PropositionStageType,
+    PropositionLink,
 ):
     sa.event.listen(_immutable_model, "before_update", _reject_immutable_update)
     sa.event.listen(_immutable_model, "before_delete", _reject_immutable_delete)

@@ -1,4 +1,4 @@
-"""Research Coverage & Fact Intelligence, Slices 1-3: ``ResearchCoverageService``.
+"""Research Coverage & Fact Intelligence, Slices 1-4: ``ResearchCoverageService``.
 
 Mirrors ``ResearchBrainService``'s transactional shape exactly: each write
 method is one atomic commit (explicit ``db.session.add``/``flush``/
@@ -41,6 +41,13 @@ rather than directly quoted. It never touches the Fact itself -- it is a
 pure side-annotation, recorded after the Fact already exists via the
 unchanged ``record_fact``, naming the formula and citing each input as
 either an existing Fact or a raw ``Evidence`` row.
+
+Slice 4 adds longitudinal proposition linkage: ``create_proposition``
+starts a thread, ``link_proposition_stage`` attaches one stage to one
+already-evidence-backed Fact or CandidateFinding (never a bare claim),
+and ``get_proposition_timeline`` returns the whole chain in date order.
+Linking is always deliberate and reviewer-initiated -- there is no
+automated matching of a new finding to an existing proposition.
 """
 
 from __future__ import annotations
@@ -51,8 +58,15 @@ import sqlalchemy as sa
 import sqlalchemy.orm as so
 
 from app import db
+from app.models.company import Company
 from app.models.document import Document, DocumentCompanyLink
-from app.models.research_brain import Evidence, ExtractedFact, ExtractionRun, ExtractionUnit
+from app.models.research_brain import (
+    Evidence,
+    ExtractedFact,
+    ExtractionRun,
+    ExtractionUnit,
+    FactEvidence,
+)
 from app.models.research_coverage import (
     CandidateFinding,
     CandidateFindingDecision,
@@ -63,6 +77,9 @@ from app.models.research_coverage import (
     CoverageReviewPass,
     FactDerivation,
     FactDerivationInput,
+    PropositionLink,
+    PropositionStageType,
+    ResearchProposition,
     ResearchDimension,
 )
 from app.services.research_brain_service import ResearchBrainService
@@ -1151,3 +1168,242 @@ class ResearchCoverageService:
     @classmethod
     def is_fact_derived(cls, fact_id: str) -> bool:
         return cls.get_fact_derivation(fact_id) is not None
+
+    # -----------------------------------------------------------------
+    # Longitudinal proposition linkage (Slice 4)
+    # -----------------------------------------------------------------
+
+    @classmethod
+    def create_proposition_stage_type(
+        cls,
+        *,
+        code: str,
+        name: str,
+        description: str,
+        is_active: bool = True,
+    ) -> PropositionStageType:
+        code = validate_upper_slug(code, "code")
+        stage_type = PropositionStageType(
+            code=code, name=name, description=description, is_active=is_active
+        )
+        try:
+            db.session.add(stage_type)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return stage_type
+
+    @classmethod
+    def create_proposition(
+        cls,
+        *,
+        company_id: str,
+        title: str,
+        created_by_user_id: str,
+        description: str | None = None,
+    ) -> ResearchProposition:
+        if db.session.get(Company, company_id) is None:
+            raise ResearchNotFoundError(
+                "company_not_found", "Company was not found"
+            )
+
+        proposition = ResearchProposition(
+            company_id=company_id,
+            title=title,
+            description=description,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(proposition)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return proposition
+
+    @classmethod
+    def _fact_evidence_document_ids(cls, fact_id: str) -> set[str]:
+        """Every distinct ``document_id`` among a Fact's own Evidence
+        rows -- a corroborated Fact can span more than one document."""
+
+        return set(
+            db.session.scalars(
+                sa.select(Evidence.document_id)
+                .join(FactEvidence, FactEvidence.evidence_id == Evidence.id)
+                .where(FactEvidence.fact_id == fact_id)
+            ).all()
+        )
+
+    @classmethod
+    def link_proposition_stage(
+        cls,
+        *,
+        proposition_id: str,
+        stage_type_id: str,
+        document_id: str,
+        created_by_user_id: str,
+        fact_id: str | None = None,
+        candidate_finding_id: str | None = None,
+        as_of_date: date | None = None,
+        period: str | None = None,
+        stage_note: str | None = None,
+    ) -> PropositionLink:
+        """Attach one stage of one proposition to something already
+        evidence-backed -- an existing ``ExtractedFact`` or
+        ``CandidateFinding``, never a bare narrative claim.
+
+        ``document_id`` must be a document the cited Fact/CandidateFinding
+        is actually sourced from -- a corroborated Fact may cite several
+        documents, in which case the caller picks which one best
+        represents this stage, but an unrelated document is rejected.
+        ``ResearchProposition`` is scoped to one company, so the cited
+        Fact/CandidateFinding must belong to that same company -- a Fact
+        directly via its own ``company_id``, a CandidateFinding via its
+        document's ``DocumentCompanyLink`` rows (a document can link to
+        more than one company, so any one of them is accepted).
+        """
+
+        if (fact_id is None) == (candidate_finding_id is None):
+            raise ResearchValidationError(
+                {
+                    "fact_id": [
+                        "Exactly one of fact_id/candidate_finding_id must "
+                        "be set"
+                    ]
+                }
+            )
+
+        proposition = db.session.get(ResearchProposition, proposition_id)
+        if proposition is None:
+            raise ResearchNotFoundError(
+                "research_proposition_not_found",
+                "ResearchProposition was not found",
+            )
+        if db.session.get(PropositionStageType, stage_type_id) is None:
+            raise ResearchNotFoundError(
+                "proposition_stage_type_not_found",
+                "PropositionStageType was not found",
+            )
+        if db.session.get(Document, document_id) is None:
+            raise ResearchNotFoundError(
+                "document_not_found", "Document was not found"
+            )
+
+        if fact_id is not None:
+            fact = db.session.get(ExtractedFact, fact_id)
+            if fact is None:
+                raise ResearchNotFoundError(
+                    "extracted_fact_not_found", "ExtractedFact was not found"
+                )
+            if fact.company_id != proposition.company_id:
+                raise ResearchValidationError(
+                    {
+                        "fact_id": [
+                            "Must belong to the proposition's own company"
+                        ]
+                    }
+                )
+            valid_document_ids = cls._fact_evidence_document_ids(fact_id)
+            if document_id not in valid_document_ids:
+                raise ResearchValidationError(
+                    {
+                        "document_id": [
+                            "Must be one of the Fact's own Evidence "
+                            "documents, not an unrelated document"
+                        ]
+                    }
+                )
+        else:
+            candidate = db.session.get(CandidateFinding, candidate_finding_id)
+            if candidate is None:
+                raise ResearchNotFoundError(
+                    "candidate_finding_not_found",
+                    "CandidateFinding was not found",
+                )
+            candidate_company_ids = set(
+                db.session.scalars(
+                    sa.select(DocumentCompanyLink.company_id).where(
+                        DocumentCompanyLink.document_id == candidate.document_id
+                    )
+                ).all()
+            )
+            if proposition.company_id not in candidate_company_ids:
+                raise ResearchValidationError(
+                    {
+                        "candidate_finding_id": [
+                            "Must belong to the proposition's own company"
+                        ]
+                    }
+                )
+            if document_id != candidate.document_id:
+                raise ResearchValidationError(
+                    {
+                        "document_id": [
+                            "Must be the CandidateFinding's own document_id"
+                        ]
+                    }
+                )
+
+        link = PropositionLink(
+            proposition_id=proposition_id,
+            stage_type_id=stage_type_id,
+            fact_id=fact_id,
+            candidate_finding_id=candidate_finding_id,
+            document_id=document_id,
+            as_of_date=as_of_date,
+            period=period,
+            stage_note=stage_note,
+            created_by_user_id=created_by_user_id,
+        )
+        try:
+            db.session.add(link)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return link
+
+    @classmethod
+    def get_proposition_timeline(cls, proposition_id: str) -> list[dict]:
+        """Every stage of a proposition, ordered chronologically (by
+        ``as_of_date``, undated stages last, tie-broken by ``created_at``),
+        each with its stage code/name, source kind, and document."""
+
+        if db.session.get(ResearchProposition, proposition_id) is None:
+            raise ResearchNotFoundError(
+                "research_proposition_not_found",
+                "ResearchProposition was not found",
+            )
+
+        links = db.session.scalars(
+            sa.select(PropositionLink)
+            .where(PropositionLink.proposition_id == proposition_id)
+            .options(
+                so.joinedload(PropositionLink.stage_type),
+                so.joinedload(PropositionLink.document),
+                so.joinedload(PropositionLink.fact),
+                so.joinedload(PropositionLink.candidate_finding),
+            )
+        ).all()
+
+        def sort_key(link: PropositionLink):
+            return (link.as_of_date is None, link.as_of_date, link.created_at)
+
+        ordered = sorted(links, key=sort_key)
+
+        return [
+            {
+                "stage_code": link.stage_type.code,
+                "stage_name": link.stage_type.name,
+                "as_of_date": link.as_of_date,
+                "period": link.period,
+                "document_id": link.document_id,
+                "document_title": link.document.title,
+                "document_type": link.document.document_type,
+                "fact_id": link.fact_id,
+                "candidate_finding_id": link.candidate_finding_id,
+                "stage_note": link.stage_note,
+            }
+            for link in ordered
+        ]
