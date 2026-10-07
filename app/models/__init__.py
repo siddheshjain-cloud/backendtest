@@ -36,4 +36,12 @@ from .research_brain import (
     ExtractionUnit,
     FactEvidence,
 )
+from .research_coverage import (
+    CoverageDocumentSubtype,
+    CoverageProfile,
+    CoverageProfileDimension,
+    CoverageRecord,
+    CoverageReviewPass,
+    ResearchDimension,
+)
 from .utils import *
