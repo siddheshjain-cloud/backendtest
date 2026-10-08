@@ -18,6 +18,14 @@ import sqlalchemy.orm as so
 from app.models.base import BaseModel
 from app.models.research_types import FinancialMetricNamespace, enum_type
 
+# Phase 3 Slice B added FinancialMetricNamespace.ADJUSTED. Verified empirically
+# before this was written: enum_type()'s sa.Enum(..., native_enum=False) does
+# not emit a database-level CHECK constraint in this codebase's SQLite/
+# SQLAlchemy configuration (validate_strings=True enforces Python-side only),
+# and the VARCHAR(10) column width already fits "ADJUSTED" (8 chars) -- the
+# CREATE TABLE DDL is byte-for-byte identical before and after this addition.
+# No migration accompanies this change.
+
 
 class FinancialMetricDefinition(BaseModel):
     """One controlled financial metric slug."""
@@ -35,6 +43,7 @@ class FinancialMetricDefinition(BaseModel):
             (
                 FinancialMetricNamespace.RAW,
                 FinancialMetricNamespace.NORMALIZED,
+                FinancialMetricNamespace.ADJUSTED,
             ),
         ),
         nullable=False,

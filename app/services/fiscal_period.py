@@ -77,6 +77,41 @@ class FiscalPeriod:
             fiscal_year=int(match.group("year")), period_type=period_type
         )
 
+    def prior_year(self) -> "FiscalPeriod":
+        """The same period type, one fiscal year earlier -- the YoY
+        comparator. Phase 3 Slice B's growth diagnostics depend on this.
+        """
+
+        return FiscalPeriod(
+            fiscal_year=self.fiscal_year - 1, period_type=self.period_type
+        )
+
+    def previous_quarter(self) -> "FiscalPeriod":
+        """The immediately preceding quarter -- the QoQ comparator.
+        Only defined for Q1-Q4; crosses the fiscal-year boundary from Q1
+        to the prior year's Q4.
+        """
+
+        quarters = [
+            FiscalPeriodType.Q1,
+            FiscalPeriodType.Q2,
+            FiscalPeriodType.Q3,
+            FiscalPeriodType.Q4,
+        ]
+        if self.period_type not in quarters:
+            raise FiscalPeriodError(
+                f"previous_quarter() is only defined for a quarterly "
+                f"period, not {self.period_type.value}"
+            )
+        index = quarters.index(self.period_type)
+        if index == 0:
+            return FiscalPeriod(
+                fiscal_year=self.fiscal_year - 1, period_type=FiscalPeriodType.Q4
+            )
+        return FiscalPeriod(
+            fiscal_year=self.fiscal_year, period_type=quarters[index - 1]
+        )
+
     def label(self) -> str:
         suffix = (
             "" if self.period_type is FiscalPeriodType.ANNUAL

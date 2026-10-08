@@ -96,6 +96,20 @@ class InvestmentOrigin:
 class FinancialMetricNamespace:
     RAW = "RAW"
     NORMALIZED = "NORMALIZED"
+    ADJUSTED = "ADJUSTED"
+
+
+class AdjustmentDirection:
+    """Which way an analytical adjustment moves the base figure.
+
+    ``ADD_BACK`` excludes a one-off *expense* (increases the adjusted
+    figure); ``DEDUCT`` excludes a one-off *gain* (decreases it). Required
+    on every adjustment item so the applied sign is always explicit, never
+    inferred.
+    """
+
+    ADD_BACK = "ADD_BACK"
+    DEDUCT = "DEDUCT"
 
 
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
