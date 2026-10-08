@@ -930,7 +930,7 @@ def test_unique_race_is_translated_to_revision_conflict(
         ),
     )
 
-    def _stale_current(_cls, _company_id):
+    def _stale_current(_cls, _company_id, _scenario=None):
         return first
 
     monkeypatch.setattr(

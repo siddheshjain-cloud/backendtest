@@ -41,6 +41,7 @@ from .investment_hypothesis import (
     InvestmentHypothesis,
     InvestmentHypothesisCitation,
 )
+from .forecast_revision_assumption import ForecastRevisionAssumption
 from .research_brain import (
     Evidence,
     ExtractedFact,
