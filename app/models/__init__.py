@@ -36,6 +36,11 @@ from .cycle_intelligence import (
     CycleAssessmentObservation,
     CycleObservation,
 )
+from .investment_hypothesis import (
+    ForecastAssumption,
+    InvestmentHypothesis,
+    InvestmentHypothesisCitation,
+)
 from .research_brain import (
     Evidence,
     ExtractedFact,
