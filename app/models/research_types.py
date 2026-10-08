@@ -60,6 +60,44 @@ class ValuationMethod:
     OTHER = "OTHER"
 
 
+class Scenario:
+    """Phase 3 scenario slug, shared by ForecastRevision and ValuationRevision.
+
+    ``MID_CYCLE`` is a normalized-earnings reference point, not a
+    probability-weighted scenario -- callers computing expected-return
+    weighting must exclude it (Phase 3 Slice G, not built yet).
+    """
+
+    BULL = "BULL"
+    BASE = "BASE"
+    BEAR = "BEAR"
+    MID_CYCLE = "MID_CYCLE"
+
+
+class InvestmentOrigin:
+    """Who authored a Phase 3 judgment-layer row.
+
+    Set once, at insertion, on tables that are immutable after insertion
+    (ForecastRevision, ValuationRevision, and -- once built in their own
+    slices -- InvestmentHypothesis/InvestmentCase). A ``SYSTEM_DRAFT`` row
+    is never authoritative on its own; "promotion" is a later
+    ``HUMAN_AUTHORED`` revision that supersedes it via the existing
+    ``supersedes_revision_id``/``supersedes_case_id`` chain -- there is no
+    separate ``promoted_by``/``promoted_at`` field, because the superseding
+    revision's own ``created_by_user_id``/``created_at`` already carries
+    that audit trail, and a mutable "promoted" marker on an
+    immutable-after-insertion row is not implementable.
+    """
+
+    SYSTEM_DRAFT = "SYSTEM_DRAFT"
+    HUMAN_AUTHORED = "HUMAN_AUTHORED"
+
+
+class FinancialMetricNamespace:
+    RAW = "RAW"
+    NORMALIZED = "NORMALIZED"
+
+
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)
 

@@ -334,6 +334,8 @@ def test_valuation_tables_have_exact_columns_and_constraints(app):
         "company_id": False,
         "valuation_method": False,
         "revision_number": False,
+        "scenario": True,
+        "origin": False,
         "supersedes_revision_id": True,
         "justified_multiple": True,
         "implied_enterprise_value": True,
@@ -364,15 +366,45 @@ def test_valuation_tables_have_exact_columns_and_constraints(app):
     }
 
     inspector = sa.inspect(db.engine)
-    revision_unique = {
-        constraint["name"]: sorted(constraint["column_names"])
-        for constraint in inspector.get_unique_constraints(
-            "valuation_revision"
-        )
+
+    # Phase 3 Slice A replaced the single composite UniqueConstraint on
+    # (company_id, valuation_method, revision_number) with two partial
+    # unique indexes -- see the matching comment in
+    # tests/research/test_forecast_revisions.py and app/models/forecast.py's
+    # module docstring for why a plain composite UNIQUE with a nullable
+    # scenario column would not have been correct.
+    assert inspector.get_unique_constraints("valuation_revision") == []
+
+    revision_indexes = {
+        index["name"]: sorted(index["column_names"])
+        for index in inspector.get_indexes("valuation_revision")
     }
-    assert revision_unique[
-        "uq_valuation_revision_company_method_number"
+    assert revision_indexes[
+        "uq_valuation_revision_company_method_number_legacy"
     ] == ["company_id", "revision_number", "valuation_method"]
+    assert revision_indexes[
+        "uq_valuation_revision_company_method_scenario_number"
+    ] == ["company_id", "revision_number", "scenario", "valuation_method"]
+
+    index_predicates = dict(
+        db.session.execute(
+            sa.text(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'valuation_revision' AND name IN "
+                "(:i1, :i2)"
+            ),
+            {
+                "i1": "uq_valuation_revision_company_method_number_legacy",
+                "i2": "uq_valuation_revision_company_method_scenario_number",
+            },
+        ).fetchall()
+    )
+    assert "WHERE scenario IS NULL" in index_predicates[
+        "uq_valuation_revision_company_method_number_legacy"
+    ]
+    assert "WHERE scenario IS NOT NULL" in index_predicates[
+        "uq_valuation_revision_company_method_scenario_number"
+    ]
 
     line_unique = {
         constraint["name"]: sorted(constraint["column_names"])
