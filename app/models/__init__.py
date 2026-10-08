@@ -29,6 +29,7 @@ from .institutional_report import InstitutionalReportMetadata
 from .market_plan import MarketPlanRevision
 from .forecast import ForecastLine, ForecastRevision
 from .valuation import ValuationReferenceLine, ValuationRevision
+from .financial_metric_definition import FinancialMetricDefinition
 from .research_brain import (
     Evidence,
     ExtractedFact,

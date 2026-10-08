@@ -5,6 +5,19 @@ EBITDA, PAT, margin, and per-share earnings for a company. Every value is
 supplied: Milestone 1 performs no forecasting, EPS derivation, share-count
 storage, or margin calculation. The stream is append-only and independent
 from every other M1 revision stream.
+
+Phase 3 Slice A adds ``scenario`` (nullable -- ``NULL`` preserves the
+exact pre-Phase-3, single-stream meaning) and ``origin``. Zero rows exist
+in this table system-wide as of Slice A, so neither addition carries any
+backfill risk. ``scenario``'s uniqueness is enforced by two *partial*
+unique indexes, not one composite ``UniqueConstraint`` -- SQL NULL is
+never equal to another NULL for uniqueness purposes, so a single
+composite constraint including a nullable ``scenario`` column would
+silently stop enforcing the legacy "(company_id, revision_number) is
+unique while scenario is NULL" invariant (verified empirically against
+this project's SQLite engine before this was written). The fix mirrors
+the filtered-index pair ``app/models/document.py`` already uses for
+``metadata_fingerprint``.
 """
 
 from __future__ import annotations
@@ -16,7 +29,12 @@ import sqlalchemy as sa
 import sqlalchemy.orm as so
 
 from app.models.base import BaseModel
-from app.models.research_types import money_column
+from app.models.research_types import (
+    InvestmentOrigin,
+    Scenario,
+    enum_type,
+    money_column,
+)
 
 
 class ForecastRevision(BaseModel):
@@ -29,6 +47,26 @@ class ForecastRevision(BaseModel):
     )
     revision_number: so.Mapped[int] = so.mapped_column(
         sa.Integer, nullable=False
+    )
+    scenario: so.Mapped[str | None] = so.mapped_column(
+        enum_type(
+            "forecast_revision_scenario",
+            (
+                Scenario.BULL,
+                Scenario.BASE,
+                Scenario.BEAR,
+                Scenario.MID_CYCLE,
+            ),
+        ),
+        nullable=True,
+    )
+    origin: so.Mapped[str] = so.mapped_column(
+        enum_type(
+            "forecast_revision_origin",
+            (InvestmentOrigin.SYSTEM_DRAFT, InvestmentOrigin.HUMAN_AUTHORED),
+        ),
+        nullable=False,
+        server_default=InvestmentOrigin.HUMAN_AUTHORED,
     )
     supersedes_revision_id: so.Mapped[str | None] = so.mapped_column(
         sa.ForeignKey("forecast_revision.id"), nullable=True
@@ -47,10 +85,22 @@ class ForecastRevision(BaseModel):
     )
 
     __table_args__ = (
-        sa.UniqueConstraint(
+        sa.Index(
+            "uq_forecast_revision_company_number_legacy",
             "company_id",
             "revision_number",
-            name="uq_forecast_revision_company_number",
+            unique=True,
+            sqlite_where=sa.text("scenario IS NULL"),
+            postgresql_where=sa.text("scenario IS NULL"),
+        ),
+        sa.Index(
+            "uq_forecast_revision_company_scenario_number",
+            "company_id",
+            "scenario",
+            "revision_number",
+            unique=True,
+            sqlite_where=sa.text("scenario IS NOT NULL"),
+            postgresql_where=sa.text("scenario IS NOT NULL"),
         ),
         sa.CheckConstraint(
             "revision_number > 0",

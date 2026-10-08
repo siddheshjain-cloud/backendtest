@@ -145,6 +145,8 @@ def test_forecast_tables_have_exact_columns_and_constraints(app):
         "created_at": False,
         "company_id": False,
         "revision_number": False,
+        "scenario": True,
+        "origin": False,
         "supersedes_revision_id": True,
         "as_of_date": False,
         "assumptions": True,
@@ -167,15 +169,47 @@ def test_forecast_tables_have_exact_columns_and_constraints(app):
     }
 
     inspector = sa.inspect(db.engine)
-    revision_unique = {
-        constraint["name"]: sorted(constraint["column_names"])
-        for constraint in inspector.get_unique_constraints(
-            "forecast_revision"
-        )
+
+    # Phase 3 Slice A replaced the single composite UniqueConstraint on
+    # (company_id, revision_number) with two partial unique indexes -- a
+    # plain composite UNIQUE with a nullable scenario column would not
+    # have enforced uniqueness among NULL rows under SQL NULL semantics
+    # (see app/models/forecast.py's module docstring). No
+    # UniqueConstraint remains on this table at all.
+    assert inspector.get_unique_constraints("forecast_revision") == []
+
+    revision_indexes = {
+        index["name"]: sorted(index["column_names"])
+        for index in inspector.get_indexes("forecast_revision")
     }
-    assert revision_unique["uq_forecast_revision_company_number"] == [
+    assert revision_indexes["uq_forecast_revision_company_number_legacy"] == [
         "company_id",
         "revision_number",
+    ]
+    assert revision_indexes["uq_forecast_revision_company_scenario_number"] == [
+        "company_id",
+        "revision_number",
+        "scenario",
+    ]
+
+    index_predicates = dict(
+        db.session.execute(
+            sa.text(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'forecast_revision' AND name IN "
+                "(:i1, :i2)"
+            ),
+            {
+                "i1": "uq_forecast_revision_company_number_legacy",
+                "i2": "uq_forecast_revision_company_scenario_number",
+            },
+        ).fetchall()
+    )
+    assert "WHERE scenario IS NULL" in index_predicates[
+        "uq_forecast_revision_company_number_legacy"
+    ]
+    assert "WHERE scenario IS NOT NULL" in index_predicates[
+        "uq_forecast_revision_company_scenario_number"
     ]
 
     line_unique = {
