@@ -112,6 +112,15 @@ class AdjustmentDirection:
     DEDUCT = "DEDUCT"
 
 
+class ExposureDirection:
+    """How a company is positioned relative to an external commodity/
+    industry cycle (Phase 3 Slice C -- Cycle Intelligence)."""
+
+    BENEFICIARY = "BENEFICIARY"
+    LOSER = "LOSER"
+    MIXED = "MIXED"
+
+
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)
 
