@@ -42,7 +42,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    app = create_app(register_research=True)
+    app = create_app(register_research=True, allow_default_database=True)
     with app.app_context():
         try:
             outcome = seed_ikio(

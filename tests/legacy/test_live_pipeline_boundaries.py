@@ -36,21 +36,29 @@ def test_live_websocket_has_no_research_document_or_policy_imports():
 
 def test_ticker_manager_construction_does_not_transitively_load_research_document_or_policy_modules():
     """Direct-import parsing alone cannot see this: ``TickerManager.__init__``
-    calls ``create_app()`` with no arguments (live/websocket.py:55), and until
-    ``create_app()`` gated research/document blueprint registration behind an
-    explicit ``register_research`` flag, that zero-argument call transitively
-    imported every research/document service and policy module into the live
-    ticker process. Probe this in a clean subprocess -- constructing
-    ``TickerManager`` itself would require live Kite/DB connectivity this test
-    must not depend on, but the transitive-import behavior is entirely
-    determined by the same zero-argument ``create_app()`` call it makes, so
+    calls ``create_app(allow_default_database=True)``
+    (live/websocket.py:55), and until ``create_app()`` gated research/
+    document blueprint registration behind an explicit
+    ``register_research`` flag, that call transitively imported every
+    research/document service and policy module into the live ticker
+    process. Probe this in a clean subprocess -- constructing
+    ``TickerManager`` itself would require live Kite/DB connectivity this
+    test must not depend on, but the transitive-import behavior is
+    entirely determined by the same ``create_app()`` call it makes, so
     reproducing that one call is sufficient and safe.
+
+    ``allow_default_database=True`` is required here (and in the real
+    call) by ``create_app()``'s own fail-closed database guard -- see
+    ``app/__init__.py``'s ``_require_explicit_database_opt_in`` -- which
+    exists specifically so that an ad-hoc script calling bare
+    ``create_app()`` can no longer silently connect to the live
+    database the way it once could.
     """
 
     probe = (
         "import sys\n"
         "from app import create_app\n"
-        "create_app()\n"
+        "create_app(allow_default_database=True)\n"
         "loaded = [name for name in sys.modules if name.startswith("
         f"{FORBIDDEN_IMPORT_PREFIXES!r})]\n"
         "print(','.join(sorted(loaded)))\n"
@@ -65,8 +73,8 @@ def test_ticker_manager_construction_does_not_transitively_load_research_documen
     assert result.returncode == 0, result.stderr
     loaded = [name for name in result.stdout.strip().split(",") if name]
     assert not loaded, (
-        "create_app() with no arguments (what TickerManager.__init__ calls) "
-        f"transitively loaded forbidden modules: {loaded}"
+        "create_app() (what TickerManager.__init__ calls) transitively "
+        f"loaded forbidden modules: {loaded}"
     )
 
 
@@ -125,7 +133,7 @@ def test_check_trades_uses_legacy_trade_and_notification_paths(app, monkeypatch)
 
 
 def _isolated_manager(app, monkeypatch):
-    monkeypatch.setattr(websocket, "create_app", lambda: app)
+    monkeypatch.setattr(websocket, "create_app", lambda **kwargs: app)
     manager = websocket.TickerManager()
     assert manager.k is None
     assert manager.kws is None
