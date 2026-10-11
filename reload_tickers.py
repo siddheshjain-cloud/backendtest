@@ -9,7 +9,7 @@ kite = Kite().kite
 instruments = kite.instruments("NSE")
 instruments = [i for i in instruments if i['tradingsymbol'] in df['SYMBOL'].values]
 
-app = create_app()
+app = create_app(allow_default_database=True)
 
 with app.app_context():
     for i in instruments:

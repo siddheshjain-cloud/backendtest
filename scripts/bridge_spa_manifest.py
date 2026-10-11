@@ -239,7 +239,7 @@ def main() -> int:
 
     only_tickers = {t.strip() for t in args.only_tickers.split(",") if t.strip()} or None
 
-    app = create_app(register_research=True)
+    app = create_app(register_research=True, allow_default_database=True)
     with app.app_context():
         results = run(
             args.actor_user_id,
