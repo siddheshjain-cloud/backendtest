@@ -34,6 +34,8 @@ import sqlalchemy as sa
 
 from app import db
 from app.models import Company, ValuationRevision
+from app.models.alert import AlertDelivery
+from app.models.alert_types import AlertEventType, AlertSeverity
 from app.models.document import (
     AcquisitionMethod,
     DiscoverySourceType,
@@ -58,6 +60,7 @@ from app.models.research_types import (
     GovernanceStatus,
     ValuationMethod,
 )
+from app.services.alert_service import AlertService
 from app.services.cycle_intelligence_service import CycleIntelligenceService
 from app.services.document_library_service import DocumentLibraryService
 from app.services.hypothesis_assumption_service import HypothesisAssumptionService
@@ -744,3 +747,185 @@ def test_scenario_return_spread_rejects_duplicate_scenario_links(
     )
     with pytest.raises(ResearchValidationError):
         InvestmentCaseService.get_scenario_return_spread(case.id)
+
+
+# --- I3AS Alert-2: Investment Brain integration -----------------------------
+#
+# Reuses Alert-1's AlertEvent/AlertDelivery/AlertService infrastructure
+# unchanged -- see app/services/investment_case_service.py's module
+# docstring. Recipients are always AlertService.admin_recipient_ids();
+# admin_user (is_admin=True, tests/conftest.py) is the only admin in
+# these tests, so it is always the expected sole recipient.
+
+
+def test_genesis_case_creation_emits_admin_alert(admin_user, company, results_document):
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+    case = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+    )
+
+    events = AlertService.list_events_for_source(
+        source_table="investment_case", source_id=case.id
+    )
+    assert [event.event_type for event in events] == [AlertEventType.INVESTMENT_CASE_CREATED]
+    event = events[0]
+    assert event.company_id == company.id
+    assert event.severity == AlertSeverity.INFO
+
+    delivery = db.session.scalar(
+        sa.select(AlertDelivery).where(AlertDelivery.alert_event_id == event.id)
+    )
+    assert delivery.recipient_user_id == admin_user.id
+
+
+def test_view_changing_supersession_emits_watch_alert_with_details(
+    admin_user, company, results_document
+):
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+    v1 = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+        view=InvestmentCaseView.ADD,
+    )
+    v2 = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+        view=InvestmentCaseView.EXIT,
+        supersedes_case_id=v1.id, change_reason="Thesis invalidated",
+    )
+
+    events = AlertService.list_events_for_source(
+        source_table="investment_case", source_id=v2.id
+    )
+    assert [event.event_type for event in events] == [
+        AlertEventType.INVESTMENT_CASE_VIEW_CHANGED
+    ]
+    event = events[0]
+    assert event.severity == AlertSeverity.WATCH
+    assert event.details == {"previous_view": "ADD", "new_view": "EXIT"}
+
+
+def test_supersession_with_unchanged_view_emits_no_alert(
+    admin_user, company, results_document
+):
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+    v1 = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+        view=InvestmentCaseView.ADD,
+    )
+    v2 = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+        view=InvestmentCaseView.ADD,
+        supersedes_case_id=v1.id, change_reason="Minor update, view unchanged",
+    )
+
+    events = AlertService.list_events_for_source(
+        source_table="investment_case", source_id=v2.id
+    )
+    assert events == []
+
+
+def test_kill_switch_trigger_emits_critical_admin_alert(
+    admin_user, company, results_document
+):
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+    case = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+    )
+    kill_switch = InvestmentCaseService.record_kill_switch(
+        investment_case_id=case.id,
+        condition="PVC-ACH spread re-widens past 2026 lows",
+        created_by_user_id=admin_user.id,
+    )
+
+    InvestmentCaseService.trigger_kill_switch(kill_switch_id=kill_switch.id)
+
+    events = AlertService.list_events_for_source(
+        source_table="investment_case_kill_switch", source_id=kill_switch.id
+    )
+    assert [event.event_type for event in events] == [AlertEventType.KILL_SWITCH_TRIGGERED]
+    event = events[0]
+    assert event.severity == AlertSeverity.CRITICAL
+    assert event.company_id == company.id
+    assert "re-widens" in event.summary
+
+    delivery = db.session.scalar(
+        sa.select(AlertDelivery).where(AlertDelivery.alert_event_id == event.id)
+    )
+    assert delivery.recipient_user_id == admin_user.id
+
+
+def test_gate_fail_emits_watch_alert_but_pass_does_not(
+    admin_user, company, results_document
+):
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+    fact = _fact(admin_user=admin_user, document=results_document, company=company)
+    case = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+    )
+
+    pass_result = InvestmentCaseService.record_gate_result(
+        investment_case_id=case.id, gate=InvestmentCaseGate.GOVERNANCE,
+        status=GateResultStatus.PASS, rationale="Clean record",
+        created_by_user_id=admin_user.id, fact_id=fact.id,
+    )
+    fail_result = InvestmentCaseService.record_gate_result(
+        investment_case_id=case.id, gate=InvestmentCaseGate.EXECUTION,
+        status=GateResultStatus.FAIL, rationale="Capacity ramp behind schedule",
+        created_by_user_id=admin_user.id, fact_id=fact.id,
+    )
+
+    assert AlertService.list_events_for_source(
+        source_table="investment_case_gate_result", source_id=pass_result.id
+    ) == []
+
+    events = AlertService.list_events_for_source(
+        source_table="investment_case_gate_result", source_id=fail_result.id
+    )
+    assert [event.event_type for event in events] == [
+        AlertEventType.INVESTMENT_CASE_GATE_FAILED
+    ]
+    event = events[0]
+    assert event.severity == AlertSeverity.WATCH
+    assert event.details == {"gate": InvestmentCaseGate.EXECUTION, "status": GateResultStatus.FAIL}
+
+
+def test_alert_recording_failure_never_affects_the_authoritative_write(
+    admin_user, company, results_document, monkeypatch
+):
+    """Fail-safe isolation: InvestmentCaseService's own business write
+    must succeed even if AlertService.record_event itself blows up
+    (not just the ordinary, already-non-raising failure modes
+    AlertService handles internally)."""
+
+    research_revision, hypothesis, forecast, valuation = _case_inputs(
+        admin_user=admin_user, company=company, results_document=results_document
+    )
+
+    def _boom(**kwargs):
+        raise RuntimeError("simulated AlertService outage")
+
+    monkeypatch.setattr(AlertService, "record_event", _boom)
+
+    case = _create_case(
+        admin_user=admin_user, company=company, research_revision=research_revision,
+        hypothesis=hypothesis, forecast=forecast, valuation=valuation,
+    )
+
+    assert case is not None
+    assert db.session.get(InvestmentCase, case.id) is not None

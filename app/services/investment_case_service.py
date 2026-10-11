@@ -26,10 +26,22 @@ linked Bull/Base/Bear ``ValuationRevision``s (``MID_CYCLE`` excluded, per
 never fabricating a return for a scenario whose linked valuation lacks
 an ``implied_future_equity_value``, consistent with every other Phase 3
 engine's "report the limitation, don't fabricate" discipline.
+
+I3AS Alert-2 (owner-approved, 2026-10-12): ``create_investment_case``,
+``trigger_kill_switch``, and ``record_gate_result`` each call
+``AlertService.record_event`` once *after* their own commit already
+succeeded, wrapped so an alert-recording failure can never roll back or
+otherwise affect the authoritative Investment Brain write above it --
+the exact same fail-safe-isolation shape Alert-1 already proved on the
+legacy Trade pathway. Recipients are always ``AlertService.
+admin_recipient_ids()`` (admin-only, per owner decision) -- this module
+never resolves recipients any other way. See ``app/services/
+alert_service.py`` and the I3AS design proposal for the full contract.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -58,8 +70,12 @@ from app.models.research_types import (
     InvestmentOrigin,
     Scenario,
 )
+from app.models.alert_types import AlertEventType, AlertSeverity
 from app.models.valuation import ValuationRevision
+from app.services.alert_service import AlertService
 from app.utils.research_errors import ResearchNotFoundError, ResearchValidationError
+
+logger = logging.getLogger(__name__)
 
 _VIEWS = (
     InvestmentCaseView.ADD,
@@ -201,7 +217,8 @@ class InvestmentCaseService:
     ) -> InvestmentCase:
         if view not in _VIEWS:
             raise ResearchValidationError({"view": [f"Must be one of {_VIEWS}"]})
-        if db.session.get(Company, company_id) is None:
+        company = db.session.get(Company, company_id)
+        if company is None:
             raise ResearchNotFoundError("company_not_found", "Company was not found")
 
         research_revision = db.session.get(ResearchRevision, research_revision_id)
@@ -292,6 +309,7 @@ class InvestmentCaseService:
                 }
             )
 
+        predecessor_view: str | None = None
         if supersedes_case_id is not None:
             predecessor = db.session.get(InvestmentCase, supersedes_case_id)
             if predecessor is None:
@@ -312,6 +330,7 @@ class InvestmentCaseService:
                     }
                 )
             revision_number = predecessor.revision_number + 1
+            predecessor_view = predecessor.view
         else:
             revision_number = 1
 
@@ -362,6 +381,40 @@ class InvestmentCaseService:
         except Exception:
             db.session.rollback()
             raise
+
+        try:
+            if predecessor_view is None:
+                AlertService.record_event(
+                    event_type=AlertEventType.INVESTMENT_CASE_CREATED,
+                    source_table="investment_case",
+                    source_id=case.id,
+                    company_id=company_id,
+                    severity=AlertSeverity.INFO,
+                    summary=(
+                        f"New investment case created for {company.display_label}: "
+                        f"{view}"
+                    ),
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+            elif predecessor_view != view:
+                AlertService.record_event(
+                    event_type=AlertEventType.INVESTMENT_CASE_VIEW_CHANGED,
+                    source_table="investment_case",
+                    source_id=case.id,
+                    company_id=company_id,
+                    severity=AlertSeverity.WATCH,
+                    summary=(
+                        f"Investment case view changed for {company.display_label}: "
+                        f"{predecessor_view} -> {view}"
+                    ),
+                    details={"previous_view": predecessor_view, "new_view": view},
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+        except Exception:
+            logger.exception(
+                "AlertService failed to record investment case alert for "
+                "case %s (business write above is unaffected)", case.id,
+            )
         return case
 
     @classmethod
@@ -439,6 +492,25 @@ class InvestmentCaseService:
         except Exception:
             db.session.rollback()
             raise
+
+        try:
+            case = db.session.get(InvestmentCase, kill_switch.investment_case_id)
+            company = db.session.get(Company, case.company_id) if case else None
+            label = company.display_label if company else kill_switch.investment_case_id
+            AlertService.record_event(
+                event_type=AlertEventType.KILL_SWITCH_TRIGGERED,
+                source_table="investment_case_kill_switch",
+                source_id=kill_switch.id,
+                company_id=case.company_id if case else None,
+                severity=AlertSeverity.CRITICAL,
+                summary=f"Kill switch triggered for {label}: {kill_switch.condition}",
+                recipient_user_ids=AlertService.admin_recipient_ids(),
+            )
+        except Exception:
+            logger.exception(
+                "AlertService failed to record kill switch alert for %s "
+                "(business write above is unaffected)", kill_switch.id,
+            )
         return kill_switch
 
     @classmethod
@@ -534,6 +606,26 @@ class InvestmentCaseService:
         except Exception:
             db.session.rollback()
             raise
+
+        if status == GateResultStatus.FAIL:
+            try:
+                company = db.session.get(Company, case.company_id)
+                label = company.display_label if company else case.company_id
+                AlertService.record_event(
+                    event_type=AlertEventType.INVESTMENT_CASE_GATE_FAILED,
+                    source_table="investment_case_gate_result",
+                    source_id=gate_result.id,
+                    company_id=case.company_id,
+                    severity=AlertSeverity.WATCH,
+                    summary=f"{gate} gate FAILED for {label}: {rationale}",
+                    details={"gate": gate, "status": status},
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+            except Exception:
+                logger.exception(
+                    "AlertService failed to record gate-FAIL alert for %s "
+                    "(business write above is unaffected)", gate_result.id,
+                )
         return gate_result
 
     @classmethod

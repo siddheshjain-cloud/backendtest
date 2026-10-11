@@ -84,6 +84,18 @@ class AlertEventType:
     TRADE_STOPLOSS_HIT = "TRADE_STOPLOSS_HIT"
     TRADE_TARGET_HIT = "TRADE_TARGET_HIT"
 
+    # Slice 2 (Investment Brain integration). Each value's source row is
+    # itself a fresh, newly-created id every time (InvestmentCaseKillSwitch
+    # can only ever trigger once; each InvestmentCaseGateResult/InvestmentCase
+    # is a brand-new append-only row even on supersession), so the
+    # per-transition-naming discipline above is not needed here -- there is
+    # no legitimate way for the same source_id to fire the same event_type
+    # twice.
+    KILL_SWITCH_TRIGGERED = "KILL_SWITCH_TRIGGERED"
+    INVESTMENT_CASE_GATE_FAILED = "INVESTMENT_CASE_GATE_FAILED"
+    INVESTMENT_CASE_CREATED = "INVESTMENT_CASE_CREATED"
+    INVESTMENT_CASE_VIEW_CHANGED = "INVESTMENT_CASE_VIEW_CHANGED"
+
 
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)
