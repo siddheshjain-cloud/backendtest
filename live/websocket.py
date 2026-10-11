@@ -52,7 +52,7 @@ class TickerManager:
     def __init__(self):
         self.kws = None
         self.tickers = {}
-        self.app = create_app()
+        self.app = create_app(allow_default_database=True)
         self.k = None
         self.is_running = False
         self.current_candles = {}
@@ -235,11 +235,51 @@ class TickerManager:
         pass
 
     def send_trade_notification(self, user, trade):
-        """Send trade notification - implement as per your notification system"""
+        """Send trade notification - implement as per your notification system
+
+        I3AS Slice 1: the original, unconditional direct Telegram send
+        below is untouched and always runs first. The AlertService call
+        after it is purely additive durability/audit tracking -- it is
+        wrapped so that any failure there can never suppress, duplicate,
+        or delay the original notification (owner-mandated acceptance
+        gate, design proposal §8 Alert-1).
+        """
         logger.info(f"Sending trade notification to user {user.id} for trade {trade.id}")
         from app.services.telegram_service import telegram_service
-        telegram_service.send_trade_alert(user, trade)
-        pass
+        sent = telegram_service.send_trade_alert(user, trade)
+
+        try:
+            self._record_trade_alert_event(user=user, trade=trade, sent=bool(sent))
+        except Exception:
+            logger.exception(
+                "I3AS AlertService failed to record trade alert event for "
+                "trade %s (original Telegram send above is unaffected)",
+                trade.id,
+            )
+
+    @staticmethod
+    def _record_trade_alert_event(*, user, trade, sent: bool) -> None:
+        from app.models.utils import TradeStatus
+        from app.models.alert_types import AlertEventType
+        from app.services.alert_service import AlertService
+
+        event_type_by_status = {
+            TradeStatus.ENTRY: AlertEventType.TRADE_ENTRY_HIT,
+            TradeStatus.STOPLOSS: AlertEventType.TRADE_STOPLOSS_HIT,
+            TradeStatus.TARGET: AlertEventType.TRADE_TARGET_HIT,
+        }
+        event_type = event_type_by_status.get(trade.status)
+        if event_type is None:
+            return
+
+        AlertService.record_event(
+            event_type=event_type,
+            source_table="trade",
+            source_id=trade.id,
+            summary=f"Trade {trade.symbol} ({trade.side}) reached {trade.status}",
+            recipient_user_ids=[user.id],
+            already_delivered={user.id: sent},
+        )
 
     def on_ticks(self, ws, ticks):
         for tick in ticks:

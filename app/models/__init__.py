@@ -42,6 +42,7 @@ from .investment_hypothesis import (
     InvestmentHypothesisCitation,
 )
 from .forecast_revision_assumption import ForecastRevisionAssumption
+from .alert import AlertDelivery, AlertEvent
 from .investment_case import (
     InvestmentCase,
     InvestmentCaseForecast,
