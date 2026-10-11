@@ -192,6 +192,23 @@ class AlertService:
             )
 
     @classmethod
+    def admin_recipient_ids(cls) -> list[str]:
+        """Every ``User`` with ``is_admin=True`` -- the owner-approved
+        v1 recipient set for new, research-intelligence-sourced alerts
+        (Alert-2+: kill switch, gate FAIL, InvestmentCase supersession).
+        The same admin-broadcast pattern ``live/websocket.py`` already
+        used for Kite-login alerts, shared here so every Alert-2+ call
+        site resolves recipients identically rather than re-querying
+        this independently. Does **not** apply to Alert-1's Trade
+        pathway, which always targets the trade's own
+        ``user_id`` -- existing user-configured Trade/Telegram alerts
+        are never redirected to admins."""
+
+        return list(
+            db.session.scalars(sa.select(User.id).where(User.is_admin.is_(True))).all()
+        )
+
+    @classmethod
     def list_events_for_source(cls, *, source_table: str, source_id: str) -> list[AlertEvent]:
         """Read-only, computed live. Every event recorded for one
         source row, oldest first."""
