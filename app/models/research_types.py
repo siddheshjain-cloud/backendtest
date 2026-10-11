@@ -121,6 +121,45 @@ class ExposureDirection:
     MIXED = "MIXED"
 
 
+class InvestmentCaseView:
+    """Investment Brain's decision output for one InvestmentCase revision
+    (Phase 3 Slice G)."""
+
+    ADD = "ADD"
+    HOLD = "HOLD"
+    DO_NOT_ADD = "DO_NOT_ADD"
+    REDUCE = "REDUCE"
+    EXIT = "EXIT"
+
+
+class InvestmentCaseGate:
+    """The nine-gate investment assessment taxonomy (owner-adopted,
+    Phase 3 Slice G). A closed, curated vocabulary -- deliberately a
+    ``CHECK``-constrained enum rather than an open lookup table, unlike
+    ``ResearchDimension``/``PropositionStageType``, because this set is
+    fixed by the owner, not expected to grow via data inserts."""
+
+    GOVERNANCE = "GOVERNANCE"
+    TRANSFORMATION = "TRANSFORMATION"
+    EXECUTION = "EXECUTION"
+    INSTITUTIONAL_ADVANTAGE = "INSTITUTIONAL_ADVANTAGE"
+    FINANCIAL_VALIDATION = "FINANCIAL_VALIDATION"
+    MARKET_CAP_OPPORTUNITY = "MARKET_CAP_OPPORTUNITY"
+    OPTIONALITY = "OPTIONALITY"
+    VARIANT_PERCEPTION = "VARIANT_PERCEPTION"
+    KILL_SWITCHES = "KILL_SWITCHES"
+
+
+class GateResultStatus:
+    """Status of one ``InvestmentCaseGateResult`` row (Phase 3 Slice G)."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    WATCH = "WATCH"
+    NOT_ASSESSED = "NOT_ASSESSED"
+    WAIVED = "WAIVED"
+
+
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)
 

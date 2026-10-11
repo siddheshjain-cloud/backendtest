@@ -42,6 +42,13 @@ from .investment_hypothesis import (
     InvestmentHypothesisCitation,
 )
 from .forecast_revision_assumption import ForecastRevisionAssumption
+from .investment_case import (
+    InvestmentCase,
+    InvestmentCaseForecast,
+    InvestmentCaseGateResult,
+    InvestmentCaseKillSwitch,
+    InvestmentCaseValuation,
+)
 from .research_brain import (
     Evidence,
     ExtractedFact,
