@@ -93,11 +93,29 @@ def assert_m1_schema_invariants(tables: dict[str, dict]) -> None:
     )
     assert eps["nullable"] is True
 
+    # Phase 3 Slice A replaced the single composite UniqueConstraint this
+    # invariant used to check with two partial unique indexes (a plain
+    # composite UNIQUE with a nullable scenario column would not have
+    # enforced uniqueness among NULL-scenario rows under SQL NULL
+    # semantics -- see app/models/forecast.py's module docstring). The
+    # underlying behavioral invariant this assertion protects --
+    # "(company_id, valuation_method, revision_number) is unique while
+    # scenario is NULL" -- is unchanged; only the DDL mechanism is. The
+    # WHERE predicate itself (not just column/uniqueness shape, which an
+    # unconditional unique index would also satisfy) is checked
+    # separately, by Phase 3 Slice A's own
+    # tests/migrations/test_phase3_slice_a_contracts_migration.py::
+    # test_scenario_uniqueness_indexes_are_partial -- not folded into
+    # assert_m1_partial_index_predicates below, which stays scoped to
+    # exactly the three original M1 indexes it already names.
     valuation = tables["valuation_revision"]
+    assert valuation["unique_constraints"] == []
     assert any(
-        set(constraint["columns"])
+        index["unique"]
+        and set(index["columns"])
         == {"company_id", "valuation_method", "revision_number"}
-        for constraint in valuation["unique_constraints"]
+        for index in valuation["indexes"]
+        if index["name"] == "uq_valuation_revision_company_method_number_legacy"
     )
 
     reference = tables["valuation_reference_line"]

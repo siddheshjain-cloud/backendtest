@@ -29,6 +29,26 @@ from .institutional_report import InstitutionalReportMetadata
 from .market_plan import MarketPlanRevision
 from .forecast import ForecastLine, ForecastRevision
 from .valuation import ValuationReferenceLine, ValuationRevision
+from .financial_metric_definition import FinancialMetricDefinition
+from .cycle_intelligence import (
+    CompanyExposure,
+    CycleAssessment,
+    CycleAssessmentObservation,
+    CycleObservation,
+)
+from .investment_hypothesis import (
+    ForecastAssumption,
+    InvestmentHypothesis,
+    InvestmentHypothesisCitation,
+)
+from .forecast_revision_assumption import ForecastRevisionAssumption
+from .investment_case import (
+    InvestmentCase,
+    InvestmentCaseForecast,
+    InvestmentCaseGateResult,
+    InvestmentCaseKillSwitch,
+    InvestmentCaseValuation,
+)
 from .research_brain import (
     Evidence,
     ExtractedFact,

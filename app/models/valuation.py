@@ -9,6 +9,12 @@ valuation revision.
 Milestone 1 stores administrator-supplied snapshots only. It never calculates
 the enterprise-to-equity bridge, operating metrics, net debt, multiples, or
 discounted values.
+
+Phase 3 Slice A adds ``scenario`` and ``origin`` -- see ``app/models/
+forecast.py``'s module docstring for why ``scenario``'s uniqueness is two
+partial unique indexes rather than one composite ``UniqueConstraint``; the
+same reasoning applies here unchanged, with ``valuation_method`` carried in
+both index column lists.
 """
 
 from __future__ import annotations
@@ -20,7 +26,12 @@ import sqlalchemy as sa
 import sqlalchemy.orm as so
 
 from app.models.base import BaseModel
-from app.models.research_types import ValuationMethod, enum_type
+from app.models.research_types import (
+    InvestmentOrigin,
+    Scenario,
+    ValuationMethod,
+    enum_type,
+)
 
 
 class ValuationRevision(BaseModel):
@@ -49,6 +60,26 @@ class ValuationRevision(BaseModel):
     )
     revision_number: so.Mapped[int] = so.mapped_column(
         sa.Integer, nullable=False
+    )
+    scenario: so.Mapped[str | None] = so.mapped_column(
+        enum_type(
+            "valuation_revision_scenario",
+            (
+                Scenario.BULL,
+                Scenario.BASE,
+                Scenario.BEAR,
+                Scenario.MID_CYCLE,
+            ),
+        ),
+        nullable=True,
+    )
+    origin: so.Mapped[str] = so.mapped_column(
+        enum_type(
+            "valuation_revision_origin",
+            (InvestmentOrigin.SYSTEM_DRAFT, InvestmentOrigin.HUMAN_AUTHORED),
+        ),
+        nullable=False,
+        server_default=InvestmentOrigin.HUMAN_AUTHORED,
     )
     supersedes_revision_id: so.Mapped[str | None] = so.mapped_column(
         sa.ForeignKey("valuation_revision.id"), nullable=True
@@ -102,11 +133,24 @@ class ValuationRevision(BaseModel):
     )
 
     __table_args__ = (
-        sa.UniqueConstraint(
+        sa.Index(
+            "uq_valuation_revision_company_method_number_legacy",
             "company_id",
             "valuation_method",
             "revision_number",
-            name="uq_valuation_revision_company_method_number",
+            unique=True,
+            sqlite_where=sa.text("scenario IS NULL"),
+            postgresql_where=sa.text("scenario IS NULL"),
+        ),
+        sa.Index(
+            "uq_valuation_revision_company_method_scenario_number",
+            "company_id",
+            "valuation_method",
+            "scenario",
+            "revision_number",
+            unique=True,
+            sqlite_where=sa.text("scenario IS NOT NULL"),
+            postgresql_where=sa.text("scenario IS NOT NULL"),
         ),
         sa.CheckConstraint(
             "revision_number > 0",

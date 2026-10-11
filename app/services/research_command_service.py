@@ -36,6 +36,7 @@ from app.models.research_types import (
     ManagementQuality,
     ResearchPointKind,
     ResearchTier,
+    Scenario,
     ValuationMethod,
 )
 from app.utils.research_errors import (
@@ -143,7 +144,15 @@ _FORECAST_REVISION_FIELDS = {
     "as_of_date",
     "assumptions",
     "change_reason",
+    "scenario",
 }
+
+_FORECAST_REVISION_SCENARIOS = (
+    Scenario.BULL,
+    Scenario.BASE,
+    Scenario.BEAR,
+    Scenario.MID_CYCLE,
+)
 
 _FORECAST_LINE_FIELDS = {
     "fiscal_year",
@@ -181,6 +190,7 @@ _VALUATION_REVISION_FIELDS = {
     "valuation_notes",
     "as_of_date",
     "change_reason",
+    "scenario",
 }
 
 _VALUATION_REFERENCE_LINE_FIELDS = {
@@ -538,7 +548,9 @@ class ResearchCommandService:
             lines = cls._build_forecast_lines(payload.get("lines", []))
             supplied_base = payload.get("base_revision_id")
 
-            current = cls._current_forecast_revision_locked(company_id)
+            current = cls._current_forecast_revision_locked(
+                company_id, values.get("scenario")
+            )
             if current is None:
                 if supplied_base is not None:
                     raise ResearchConflictError(
@@ -642,7 +654,7 @@ class ResearchCommandService:
             supplied_base = payload.get("base_revision_id")
 
             current = cls._current_valuation_revision_locked(
-                company_id, method
+                company_id, method, values.get("scenario")
             )
             if current is None:
                 if supplied_base is not None:
@@ -1097,7 +1109,21 @@ class ResearchCommandService:
     def _is_forecast_revision_number_unique_violation(
         cls, error: IntegrityError
     ) -> bool:
-        """Identify only the unique race for a company's forecast number."""
+        """Identify only the unique race for one company's forecast
+        revision-number stream.
+
+        Corrected for Slice E: Slice A's migration replaced the single
+        ``uq_forecast_revision_company_number`` constraint this check
+        originally named with two partial unique indexes --
+        ``uq_forecast_revision_company_number_legacy`` (the legacy,
+        ``scenario IS NULL`` stream) and
+        ``uq_forecast_revision_company_scenario_number`` (one independent
+        stream per scenario) -- so a genuine race on either stream no
+        longer matched the old name and would have leaked a raw
+        IntegrityError instead of the clean ``ResearchConflictError``
+        every caller already expects. Both index names are recognized
+        here, alongside the original name for back-compat with any
+        environment that has not yet run the Slice A migration."""
 
         constraint_name = getattr(
             getattr(error.orig, "diag", None),
@@ -1105,9 +1131,10 @@ class ResearchCommandService:
             None,
         )
         if constraint_name is not None:
-            return (
-                constraint_name
-                == "uq_forecast_revision_company_number"
+            return constraint_name in (
+                "uq_forecast_revision_company_number",
+                "uq_forecast_revision_company_number_legacy",
+                "uq_forecast_revision_company_scenario_number",
             )
 
         if db.engine.dialect.name != "sqlite":
@@ -1125,29 +1152,57 @@ class ResearchCommandService:
         columns = tuple(
             column.strip() for column in message[len(prefix) :].split(",")
         )
-        return columns == (
-            "forecast_revision.company_id",
-            "forecast_revision.revision_number",
+        return columns in (
+            ("forecast_revision.company_id", "forecast_revision.revision_number"),
+            (
+                "forecast_revision.company_id",
+                "forecast_revision.scenario",
+                "forecast_revision.revision_number",
+            ),
         )
 
     @staticmethod
     def _current_forecast_revision_locked(
         company_id: str,
+        scenario: str | None = None,
     ) -> ForecastRevision | None:
-        """Select the current forecast revision by highest number."""
+        """Select the current forecast revision by highest number, scoped
+        to one independent revision stream per ``(company_id, scenario)``
+        -- ``scenario=None`` is the legacy single-stream behaviour,
+        unchanged, and is itself its own independent stream (never mixed
+        with any scenario-tagged stream), matching the partial-unique-
+        index pair Slice A already created on this exact scoping."""
 
+        query = sa.select(ForecastRevision).where(
+            ForecastRevision.company_id == company_id
+        )
+        if scenario is None:
+            query = query.where(ForecastRevision.scenario.is_(None))
+        else:
+            query = query.where(ForecastRevision.scenario == scenario)
         return db.session.scalar(
-            sa.select(ForecastRevision)
-            .where(ForecastRevision.company_id == company_id)
-            .order_by(ForecastRevision.revision_number.desc())
-            .with_for_update()
+            query.order_by(ForecastRevision.revision_number.desc()).with_for_update()
         )
 
     @classmethod
     def _is_valuation_revision_number_unique_violation(
         cls, error: IntegrityError
     ) -> bool:
-        """Identify only the unique race for one valuation method stream."""
+        """Identify only the unique race for one valuation method/scenario
+        stream.
+
+        Corrected for Slice F, the same way Slice E corrected the
+        analogous forecast check: Slice A's migration replaced the
+        single ``uq_valuation_revision_company_method_number`` constraint
+        this check originally named with two partial unique indexes --
+        ``uq_valuation_revision_company_method_number_legacy`` (the
+        legacy, ``scenario IS NULL`` stream) and
+        ``uq_valuation_revision_company_method_scenario_number`` (one
+        independent stream per scenario) -- so a genuine race on either
+        stream no longer matched the old name and would have leaked a
+        raw IntegrityError instead of the clean ``ResearchConflictError``
+        every caller already expects. Both index names are recognized
+        here, alongside the original name for back-compat."""
 
         constraint_name = getattr(
             getattr(error.orig, "diag", None),
@@ -1155,9 +1210,10 @@ class ResearchCommandService:
             None,
         )
         if constraint_name is not None:
-            return (
-                constraint_name
-                == "uq_valuation_revision_company_method_number"
+            return constraint_name in (
+                "uq_valuation_revision_company_method_number",
+                "uq_valuation_revision_company_method_number_legacy",
+                "uq_valuation_revision_company_method_scenario_number",
             )
 
         if db.engine.dialect.name != "sqlite":
@@ -1175,10 +1231,18 @@ class ResearchCommandService:
         columns = tuple(
             column.strip() for column in message[len(prefix) :].split(",")
         )
-        return columns == (
-            "valuation_revision.company_id",
-            "valuation_revision.valuation_method",
-            "valuation_revision.revision_number",
+        return columns in (
+            (
+                "valuation_revision.company_id",
+                "valuation_revision.valuation_method",
+                "valuation_revision.revision_number",
+            ),
+            (
+                "valuation_revision.company_id",
+                "valuation_revision.valuation_method",
+                "valuation_revision.scenario",
+                "valuation_revision.revision_number",
+            ),
         )
 
     @staticmethod
@@ -1208,17 +1272,27 @@ class ResearchCommandService:
     def _current_valuation_revision_locked(
         company_id: str,
         valuation_method: str,
+        scenario: str | None = None,
     ) -> ValuationRevision | None:
-        """Select the current valuation revision for one method stream."""
+        """Select the current valuation revision, scoped to one
+        independent revision stream per ``(company_id, valuation_method,
+        scenario)`` -- ``scenario=None`` is the legacy single-stream
+        behaviour, unchanged, and is its own independent stream (never
+        mixed with any scenario-tagged stream), matching the partial-
+        unique-index pair Slice A already created on this exact scoping
+        (the same correction Slice E already made for
+        ``_current_forecast_revision_locked``)."""
 
+        query = sa.select(ValuationRevision).where(
+            ValuationRevision.company_id == company_id,
+            ValuationRevision.valuation_method == valuation_method,
+        )
+        if scenario is None:
+            query = query.where(ValuationRevision.scenario.is_(None))
+        else:
+            query = query.where(ValuationRevision.scenario == scenario)
         return db.session.scalar(
-            sa.select(ValuationRevision)
-            .where(
-                ValuationRevision.company_id == company_id,
-                ValuationRevision.valuation_method == valuation_method,
-            )
-            .order_by(ValuationRevision.revision_number.desc())
-            .with_for_update()
+            query.order_by(ValuationRevision.revision_number.desc()).with_for_update()
         )
 
     @classmethod
@@ -1497,6 +1571,17 @@ class ResearchCommandService:
                 {field: ["Unknown field"] for field in unknown}
             )
 
+        scenario = payload.get("scenario")
+        if scenario is not None and scenario not in _FORECAST_REVISION_SCENARIOS:
+            raise ResearchValidationError(
+                {
+                    "scenario": [
+                        f"Must be one of {_FORECAST_REVISION_SCENARIOS} or "
+                        "omitted for the legacy single-stream forecast"
+                    ]
+                }
+            )
+
         return {
             "as_of_date": cls._required_date(
                 payload.get("as_of_date"), "as_of_date"
@@ -1507,6 +1592,7 @@ class ResearchCommandService:
             "change_reason": cls._optional_text(
                 payload.get("change_reason"), "change_reason"
             ),
+            "scenario": scenario,
         }
 
     @classmethod
@@ -1637,8 +1723,20 @@ class ResearchCommandService:
                 }
             )
 
+        scenario = payload.get("scenario")
+        if scenario is not None and scenario not in _FORECAST_REVISION_SCENARIOS:
+            raise ResearchValidationError(
+                {
+                    "scenario": [
+                        f"Must be one of {_FORECAST_REVISION_SCENARIOS} or "
+                        "omitted for the legacy single-stream valuation"
+                    ]
+                }
+            )
+
         return {
             "valuation_method": method,
+            "scenario": scenario,
             "justified_multiple": cls._optional_fixed_decimal(
                 payload.get("justified_multiple"), "justified_multiple"
             ),
