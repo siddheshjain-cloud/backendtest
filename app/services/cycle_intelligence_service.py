@@ -26,12 +26,14 @@ two independently queryable mechanisms, not one shared table.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import sqlalchemy as sa
 import sqlalchemy.orm as so
 
 from app import db
+from app.models.alert_types import AlertEventType, AlertSeverity
 from app.models.company import Company
 from app.models.cycle_intelligence import (
     CompanyExposure,
@@ -41,7 +43,10 @@ from app.models.cycle_intelligence import (
 )
 from app.models.document import Document
 from app.models.research_brain import Evidence
+from app.services.alert_service import AlertService
 from app.utils.research_errors import ResearchNotFoundError, ResearchValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class CycleIntelligenceService:
@@ -227,6 +232,30 @@ class CycleIntelligenceService:
         except Exception:
             db.session.rollback()
             raise
+
+        if supersedes_revision_id is not None:
+            try:
+                AlertService.record_event(
+                    event_type=AlertEventType.CYCLE_ASSESSMENT_SUPERSEDED,
+                    source_table="cycle_assessment",
+                    source_id=assessment.id,
+                    severity=AlertSeverity.WATCH,
+                    summary=(
+                        f"Cycle view changed for {cycle_tag} ({scenario}): "
+                        f"revision {assessment.revision_number}"
+                    ),
+                    details={
+                        "cycle_tag": cycle_tag,
+                        "scenario": scenario,
+                        "supersedes_revision_id": supersedes_revision_id,
+                    },
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+            except Exception:
+                logger.exception(
+                    "AlertService failed to record cycle assessment alert "
+                    "for %s (business write above is unaffected)", assessment.id,
+                )
         return assessment
 
     @classmethod

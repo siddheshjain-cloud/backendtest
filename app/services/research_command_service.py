@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -10,6 +11,8 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app import db
+from app.models.alert_types import AlertEventType, AlertSeverity
+from app.services.alert_service import AlertService
 from app.models import (
     BusinessGroup,
     Company,
@@ -49,6 +52,8 @@ from app.utils.research_validation import (
     validate_upper_slug,
 )
 
+
+logger = logging.getLogger(__name__)
 
 ISIN_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
@@ -808,6 +813,28 @@ class ResearchCommandService:
         except Exception:
             db.session.rollback()
             raise
+
+        if flag.severity in (GovernanceSeverity.HIGH, GovernanceSeverity.CRITICAL):
+            try:
+                AlertService.record_event(
+                    event_type=AlertEventType.GOVERNANCE_FLAG_RAISED,
+                    source_table="governance_flag",
+                    source_id=flag.id,
+                    company_id=company_id,
+                    severity=(
+                        AlertSeverity.CRITICAL
+                        if flag.severity == GovernanceSeverity.CRITICAL
+                        else AlertSeverity.WATCH
+                    ),
+                    summary=f"Governance flag raised ({flag.severity}): {flag.title}",
+                    details={"flag_type": flag.flag_type, "severity": flag.severity},
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+            except Exception:
+                logger.exception(
+                    "AlertService failed to record governance flag alert for "
+                    "%s (business write above is unaffected)", flag.id,
+                )
         return flag
 
     @classmethod

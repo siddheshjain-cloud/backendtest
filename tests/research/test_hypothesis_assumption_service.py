@@ -169,6 +169,47 @@ def test_genesis_and_supersession_chain(admin_user, results_document, company):
     assert [row.id for row in history] == [v1.id, v2.id]
 
 
+def test_supersession_emits_admin_alert_but_genesis_does_not(
+    admin_user, results_document, company
+):
+    """I3AS Alert-3."""
+    from app.models.alert import AlertDelivery
+    from app.models.alert_types import AlertEventType, AlertSeverity
+    from app.services.alert_service import AlertService
+
+    fact = _fact(admin_user=admin_user, document=results_document, company=company)
+    v1 = HypothesisAssumptionService.create_investment_hypothesis(
+        company_id=company.id, title="Margin recovery thesis",
+        thesis_narrative="Margins recover as spreads normalize.",
+        confidence="MEDIUM", created_by_user_id=admin_user.id,
+        citations=[{"fact_id": fact.id}],
+    )
+    assert AlertService.list_events_for_source(
+        source_table="investment_hypothesis", source_id=v1.id
+    ) == []
+
+    v2 = HypothesisAssumptionService.create_investment_hypothesis(
+        company_id=company.id, title="Margin recovery thesis (updated)",
+        thesis_narrative="Margins recovering faster than expected.",
+        confidence="HIGH", created_by_user_id=admin_user.id,
+        citations=[{"fact_id": fact.id}],
+        supersedes_revision_id=v1.id, change_reason="New data",
+    )
+    events = AlertService.list_events_for_source(
+        source_table="investment_hypothesis", source_id=v2.id
+    )
+    assert [event.event_type for event in events] == [
+        AlertEventType.INVESTMENT_HYPOTHESIS_SUPERSEDED
+    ]
+    assert events[0].severity == AlertSeverity.WATCH
+    assert events[0].company_id == company.id
+
+    delivery = db.session.scalar(
+        sa.select(AlertDelivery).where(AlertDelivery.alert_event_id == events[0].id)
+    )
+    assert delivery.recipient_user_id == admin_user.id
+
+
 def test_supersession_requires_change_reason(admin_user, results_document, company):
     fact = _fact(admin_user=admin_user, document=results_document, company=company)
     v1 = HypothesisAssumptionService.create_investment_hypothesis(

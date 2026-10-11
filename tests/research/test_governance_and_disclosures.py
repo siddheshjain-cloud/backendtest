@@ -230,6 +230,42 @@ def test_service_persists_complete_governance_flag(
     assert persisted.created_by_user_id == admin_user.id
 
 
+def test_high_severity_flag_emits_admin_alert_but_low_severity_does_not(
+    app, admin_user, company
+):
+    """I3AS Alert-3."""
+    from app.models.alert_types import AlertEventType, AlertSeverity
+    from app.services.alert_service import AlertService
+
+    low_flag = ResearchCommandService.create_governance_flag(
+        company.id, actor_user_id=admin_user.id,
+        payload=_flag_payload(severity=GovernanceSeverity.LOW),
+    )
+    assert AlertService.list_events_for_source(
+        source_table="governance_flag", source_id=low_flag.id
+    ) == []
+
+    high_flag = ResearchCommandService.create_governance_flag(
+        company.id, actor_user_id=admin_user.id,
+        payload=_flag_payload(severity=GovernanceSeverity.HIGH),
+    )
+    events = AlertService.list_events_for_source(
+        source_table="governance_flag", source_id=high_flag.id
+    )
+    assert [event.event_type for event in events] == [AlertEventType.GOVERNANCE_FLAG_RAISED]
+    assert events[0].severity == AlertSeverity.WATCH
+    assert events[0].company_id == company.id
+
+    critical_flag = ResearchCommandService.create_governance_flag(
+        company.id, actor_user_id=admin_user.id,
+        payload=_flag_payload(severity=GovernanceSeverity.CRITICAL),
+    )
+    events = AlertService.list_events_for_source(
+        source_table="governance_flag", source_id=critical_flag.id
+    )
+    assert events[0].severity == AlertSeverity.CRITICAL
+
+
 @pytest.mark.parametrize(
     "field",
     [
