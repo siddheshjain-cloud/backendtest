@@ -96,6 +96,15 @@ class AlertEventType:
     INVESTMENT_CASE_CREATED = "INVESTMENT_CASE_CREATED"
     INVESTMENT_CASE_VIEW_CHANGED = "INVESTMENT_CASE_VIEW_CHANGED"
 
+    # Alert-3 (broader Research Brain event sources). Each source row is
+    # itself a fresh id every time (a new GovernanceFlag row per flag; a
+    # new CycleAssessment/InvestmentHypothesis row even on supersession),
+    # so -- exactly like Alert-2 -- no per-transition naming trick is
+    # needed here.
+    GOVERNANCE_FLAG_RAISED = "GOVERNANCE_FLAG_RAISED"
+    CYCLE_ASSESSMENT_SUPERSEDED = "CYCLE_ASSESSMENT_SUPERSEDED"
+    INVESTMENT_HYPOTHESIS_SUPERSEDED = "INVESTMENT_HYPOTHESIS_SUPERSEDED"
+
 
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)

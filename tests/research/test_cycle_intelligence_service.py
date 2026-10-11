@@ -117,6 +117,47 @@ def test_genesis_and_supersession_chain(admin_user, results_document):
     assert [row.id for row in history] == [v1.id, v2.id]
 
 
+def test_supersession_emits_admin_alert_but_genesis_does_not(
+    admin_user, results_document
+):
+    """I3AS Alert-3."""
+    from app.models.alert import AlertDelivery
+    from app.models.alert_types import AlertEventType, AlertSeverity
+    from app.services.alert_service import AlertService
+
+    observation = _observation(
+        admin_user=admin_user, document=results_document, cycle_tag="PVC_RESIN_ALERT3"
+    )
+    v1 = CycleIntelligenceService.create_cycle_assessment(
+        cycle_tag="PVC_RESIN_ALERT3", scenario="BASE",
+        narrative="Spread normalization underway.",
+        observation_ids=[observation.id], created_by_user_id=admin_user.id,
+    )
+    assert AlertService.list_events_for_source(
+        source_table="cycle_assessment", source_id=v1.id
+    ) == []
+
+    v2 = CycleIntelligenceService.create_cycle_assessment(
+        cycle_tag="PVC_RESIN_ALERT3", scenario="BASE",
+        narrative="Spread normalization further along than expected.",
+        observation_ids=[observation.id], created_by_user_id=admin_user.id,
+        supersedes_revision_id=v1.id, change_reason="New data point",
+    )
+    events = AlertService.list_events_for_source(
+        source_table="cycle_assessment", source_id=v2.id
+    )
+    assert [event.event_type for event in events] == [
+        AlertEventType.CYCLE_ASSESSMENT_SUPERSEDED
+    ]
+    assert events[0].severity == AlertSeverity.WATCH
+    assert events[0].company_id is None
+
+    delivery = db.session.scalar(
+        sa.select(AlertDelivery).where(AlertDelivery.alert_event_id == events[0].id)
+    )
+    assert delivery.recipient_user_id == admin_user.id
+
+
 def test_supersession_requires_change_reason(admin_user, results_document):
     observation = _observation(admin_user=admin_user, document=results_document)
     v1 = CycleIntelligenceService.create_cycle_assessment(
