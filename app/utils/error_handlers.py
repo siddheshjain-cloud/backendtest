@@ -3,8 +3,36 @@ from sqlalchemy.exc import IntegrityError
 from marshmallow import ValidationError
 from werkzeug.exceptions import NotFound, BadRequest, Unauthorized, Forbidden, MethodNotAllowed
 
+from app.utils.research_errors import (
+    ResearchConflictError,
+    ResearchForbiddenError,
+    ResearchNotFoundError,
+    ResearchValidationError,
+    research_error_response,
+)
+
 
 def register_error_handlers(app):
+    @app.errorhandler(ResearchValidationError)
+    def handle_research_validation_error(e):
+        payload, status = research_error_response(e)
+        return jsonify(payload), status
+
+    @app.errorhandler(ResearchConflictError)
+    def handle_research_conflict_error(e):
+        payload, status = research_error_response(e)
+        return jsonify(payload), status
+
+    @app.errorhandler(ResearchNotFoundError)
+    def handle_research_not_found_error(e):
+        payload, status = research_error_response(e)
+        return jsonify(payload), status
+
+    @app.errorhandler(ResearchForbiddenError)
+    def handle_research_forbidden_error(e):
+        payload, status = research_error_response(e)
+        return jsonify(payload), status
+
     @app.errorhandler(ValidationError)
     def handle_validation_error(e):
         return jsonify({'error': 'Validation error', 'details': e.messages}), 400

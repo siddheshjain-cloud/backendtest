@@ -1,0 +1,471 @@
+[
+ {
+  "company": "AXISCADES Technologies Ltd",
+  "nse_symbol": "AXISCADES",
+  "bse_code": "532395",
+  "nse_master_name": "AXISCADES Technologies Limited",
+  "isin": "INE555B01013"
+ },
+ {
+  "company": "BirlaNu Ltd",
+  "nse_symbol": "BIRLANU",
+  "bse_code": "509675",
+  "nse_master_name": "BirlaNu Limited",
+  "isin": "INE557A01011"
+ },
+ {
+  "company": "Chemplast Sanmar Ltd",
+  "nse_symbol": "CHEMPLASTS",
+  "bse_code": "543336",
+  "nse_master_name": "Chemplast Sanmar Limited",
+  "isin": "INE488A01050"
+ },
+ {
+  "company": "E.I.D.-Parry (India) Ltd",
+  "nse_symbol": "EIDPARRY",
+  "bse_code": "500125",
+  "nse_master_name": "EID Parry India Limited",
+  "isin": "INE126A01031"
+ },
+ {
+  "company": "Refex Industries Ltd",
+  "nse_symbol": "REFEX",
+  "bse_code": "532884",
+  "nse_master_name": "Refex Industries Limited",
+  "isin": "INE056I01025"
+ },
+ {
+  "company": "Tempsens Instruments (India) Ltd",
+  "nse_symbol": "TEMPSENS",
+  "bse_code": "544886",
+  "nse_master_name": "Tempsens Instruments (India) Limited",
+  "isin": "INE1KZI01025"
+ },
+ {
+  "company": "Morepen Laboratories Ltd",
+  "nse_symbol": "MOREPENLAB",
+  "bse_code": "500288",
+  "nse_master_name": "Morepen Laboratories Limited",
+  "isin": "INE083A01026"
+ },
+ {
+  "company": "Indo-MIM Ltd",
+  "nse_symbol": "INDOMIM",
+  "bse_code": "544837",
+  "nse_master_name": "INDO-MIM Limited",
+  "isin": "INE084101034"
+ },
+ {
+  "company": "GE Vernova T&D India Ltd",
+  "nse_symbol": "GVT&D",
+  "bse_code": "522275",
+  "nse_master_name": "GE Vernova T&D India Limited",
+  "isin": "INE200A01026"
+ },
+ {
+  "company": "Lalitha Jewellery Mart Ltd",
+  "nse_symbol": "LALITHAA",
+  "bse_code": "544879",
+  "nse_master_name": "Lalithaa Jewellery Mart Limited",
+  "isin": "INE0K9O01026"
+ },
+ {
+  "company": "Parsvnath Developers Ltd",
+  "nse_symbol": "PARSVNATH",
+  "bse_code": "532780",
+  "nse_master_name": "Parsvnath Developers Limited",
+  "isin": "INE561H01026"
+ },
+ {
+  "company": "Knack Packaging Ltd",
+  "nse_symbol": "KNACK",
+  "bse_code": "544814",
+  "nse_master_name": "Knack Packaging Limited",
+  "isin": "INE17QZ01016"
+ },
+ {
+  "company": "Max Estates Ltd",
+  "nse_symbol": "MAXESTATES",
+  "bse_code": "544008",
+  "nse_master_name": "Max Estates Limited",
+  "isin": "INE03EI01018"
+ },
+ {
+  "company": "JITF Infralogistics Ltd",
+  "nse_symbol": "JITFINFRA",
+  "bse_code": "540311",
+  "nse_master_name": "JITF Infralogistics Limited",
+  "isin": "INE863T01013"
+ },
+ {
+  "company": "Sigma Advanced Systems Ltd",
+  "nse_symbol": "SIGMAADV",
+  "bse_code": "532408",
+  "nse_master_name": "SIGMA ADVANCED SYSTEMS LIMITED",
+  "isin": "INE933B01012"
+ },
+ {
+  "company": "Cemindia Projects Ltd",
+  "nse_symbol": "CEMPRO",
+  "bse_code": "509496",
+  "nse_master_name": "Cemindia Projects Limited",
+  "isin": "INE686A01026"
+ },
+ {
+  "company": "Asian Energy Services Ltd",
+  "nse_symbol": "ASIANENE",
+  "bse_code": "530355",
+  "nse_master_name": "Asian Energy Services Limited",
+  "isin": "INE276G01015"
+ },
+ {
+  "company": "Bombay Dyeing & Mfg. Co. Ltd",
+  "nse_symbol": "BOMDYEING",
+  "bse_code": "500020",
+  "nse_master_name": "Bombay Dyeing & Mfg Company Limited",
+  "isin": "INE032A01023"
+ },
+ {
+  "company": "Gujarat Kidney & Super Speciality Ltd",
+  "nse_symbol": "GKSL",
+  "bse_code": "544666",
+  "nse_master_name": "Gujarat Kidney And Super Speciality Limited",
+  "isin": "INE0V0W01025"
+ },
+ {
+  "company": "Jaykay Enterprises Ltd",
+  "nse_symbol": "JAYKAY",
+  "bse_code": "500306",
+  "nse_master_name": "Jaykay Enterprises Limited",
+  "isin": "INE903A01025"
+ },
+ {
+  "company": "Uno Minda Ltd",
+  "nse_symbol": "UNOMINDA",
+  "bse_code": "532539",
+  "nse_master_name": "UNO Minda Limited",
+  "isin": "INE405E01023"
+ },
+ {
+  "company": "TTK Healthcare Ltd",
+  "nse_symbol": "TTKHLTCARE",
+  "bse_code": "507747",
+  "nse_master_name": "TTK Healthcare Limited",
+  "isin": "INE910C01018"
+ },
+ {
+  "company": "Quality Power Electrical Equipments Ltd",
+  "nse_symbol": "QPOWER",
+  "bse_code": "544367",
+  "nse_master_name": "Quality Power Electrical Equipments Limited",
+  "isin": "INE0SII01026"
+ },
+ {
+  "company": "Solex Energy Ltd",
+  "nse_symbol": "SOLEX",
+  "bse_code": "544862",
+  "nse_master_name": "Solex Energy Limited",
+  "isin": "INE880Y01017"
+ },
+ {
+  "company": "Dee Development Engineers Ltd",
+  "nse_symbol": "DEEDEV",
+  "bse_code": "544198",
+  "nse_master_name": "DEE Development Engineers Limited",
+  "isin": "INE841L01016"
+ },
+ {
+  "company": "Juniper Green Energy Ltd",
+  "nse_symbol": "JNPR",
+  "bse_code": "544853",
+  "nse_master_name": "Juniper Green Energy Limited",
+  "isin": "INE05C901015"
+ },
+ {
+  "company": "SoftTech Engineers Ltd",
+  "nse_symbol": "SOFTTECH",
+  "bse_code": "543470",
+  "nse_master_name": "Softtech Engineers Limited",
+  "isin": "INE728Z01015"
+ },
+ {
+  "company": "STL Networks Ltd",
+  "nse_symbol": "STLNETWORK",
+  "bse_code": "544395",
+  "nse_master_name": "STL Networks Limited",
+  "isin": "INE1VXE01018"
+ },
+ {
+  "company": "Ratnaveer Precision Engineering Ltd",
+  "nse_symbol": "RATNAVEER",
+  "bse_code": "543978",
+  "nse_master_name": "Ratnaveer Precision Engineering Limited",
+  "isin": "INE05CZ01011"
+ },
+ {
+  "company": "Shanti Gold International Ltd",
+  "nse_symbol": "SHANTIGOLD",
+  "bse_code": "544459",
+  "nse_master_name": "Shanti Gold International Limited",
+  "isin": "INE06ZD01017"
+ },
+ {
+  "company": "MV Electrosystems Ltd",
+  "nse_symbol": "MVELECTRO",
+  "bse_code": "544851",
+  "nse_master_name": "MV Electrosystems Limited",
+  "isin": "INE0OWZ01020"
+ },
+ {
+  "company": "Emmvee Photovoltaic Power Ltd",
+  "nse_symbol": "EMMVEE",
+  "bse_code": "544608",
+  "nse_master_name": "Emmvee Photovoltaic Power Limited",
+  "isin": "INE1C6T01020"
+ },
+ {
+  "company": "Apollo Micro Systems Ltd",
+  "nse_symbol": "APOLLO",
+  "bse_code": "540879",
+  "nse_master_name": "Apollo Micro Systems Limited",
+  "isin": "INE713T01028"
+ },
+ {
+  "company": "Apollo Sindoori Hotels Ltd",
+  "nse_symbol": "APOLSINHOT",
+  "bse_code": "532752",
+  "nse_master_name": "Apollo Sindoori Hotels Limited",
+  "isin": "INE451F01024"
+ },
+ {
+  "company": "Bonlon Industries Ltd",
+  "nse_symbol": "BONLON",
+  "bse_code": "543211",
+  "nse_master_name": "Bonlon Industries Limited",
+  "isin": "INE0B9A01018"
+ },
+ {
+  "company": "Choice International Ltd",
+  "nse_symbol": "CHOICEIN",
+  "bse_code": "531358",
+  "nse_master_name": "Choice International Limited",
+  "isin": "INE102B01014"
+ },
+ {
+  "company": "Gujarat Industries Power Company Ltd",
+  "nse_symbol": "GIPCL",
+  "bse_code": "517300",
+  "nse_master_name": "Gujarat Industries Power Company Limited",
+  "isin": "INE162A01010"
+ },
+ {
+  "company": "JK Paper Ltd",
+  "nse_symbol": "JKPAPER",
+  "bse_code": "532162",
+  "nse_master_name": "JK Paper Limited",
+  "isin": "INE789E01012"
+ },
+ {
+  "company": "Manipal Health Enterprises Ltd",
+  "nse_symbol": "MANIPALHOS",
+  "bse_code": "544847",
+  "nse_master_name": "Manipal Health Enterprises Limited",
+  "isin": "INE459N01021"
+ },
+ {
+  "company": "Mishra Dhatu Nigam Ltd",
+  "nse_symbol": "MIDHANI",
+  "bse_code": "541195",
+  "nse_master_name": "Mishra Dhatu Nigam Limited",
+  "isin": "INE099Z01011"
+ },
+ {
+  "company": "Tega Industries Ltd",
+  "nse_symbol": "TEGA",
+  "bse_code": "543413",
+  "nse_master_name": "Tega Industries Limited",
+  "isin": "INE011K01018"
+ },
+ {
+  "company": "Blue Jet Healthcare Ltd",
+  "nse_symbol": "BLUEJET",
+  "bse_code": "544009",
+  "nse_master_name": "Blue Jet Healthcare Limited",
+  "isin": "INE0KBH01020"
+ },
+ {
+  "company": "Priority Jewels Ltd",
+  "nse_symbol": "PRIORITY",
+  "bse_code": "544899",
+  "nse_master_name": "Priority Jewels Limited",
+  "isin": "INE15EH01014"
+ },
+ {
+  "company": "Cello World Ltd",
+  "nse_symbol": "CELLO",
+  "bse_code": "544012",
+  "nse_master_name": "Cello World Limited",
+  "isin": "INE0LMW01024"
+ },
+ {
+  "company": "Arrow Greentech Ltd",
+  "nse_symbol": "ARROWGREEN",
+  "bse_code": "516064",
+  "nse_master_name": "Arrow Greentech Limited",
+  "isin": "INE570D01018"
+ },
+ {
+  "company": "Sadbhav Engineering Ltd",
+  "nse_symbol": "SADBHAV",
+  "bse_code": "532710",
+  "nse_master_name": "Sadbhav Engineering Limited",
+  "isin": "INE226H01026"
+ },
+ {
+  "company": "Veegaland Developers Ltd",
+  "nse_symbol": "VEEGALAND",
+  "bse_code": "544923",
+  "nse_master_name": "Veegaland Developers Limited",
+  "isin": "INE1JTV01015"
+ },
+ {
+  "company": "Aeron Composite Ltd",
+  "nse_symbol": "AERON",
+  "bse_code": "",
+  "nse_master_name": "Aeron Composite Limited",
+  "isin": "INE0WL801011"
+ },
+ {
+  "company": "TimeScan Logistics Ltd",
+  "nse_symbol": "TIMESCAN",
+  "bse_code": "",
+  "nse_master_name": "Timescan Logistics (India) Limited",
+  "isin": "INE0IJY01014"
+ },
+ {
+  "company": "GP Eco Solutions India Ltd",
+  "nse_symbol": "GPECO",
+  "bse_code": "",
+  "nse_master_name": "GP Eco Solutions India Limited",
+  "isin": "INE0S7E01015"
+ },
+ {
+  "company": "Alpex Solar Ltd",
+  "nse_symbol": "ALPEXSOLAR",
+  "bse_code": "",
+  "nse_master_name": "Alpex Solar Limited",
+  "isin": "INE0R4701017"
+ },
+ {
+  "company": "Monolithisch India Ltd",
+  "nse_symbol": "MONOLITH",
+  "bse_code": "",
+  "nse_master_name": "Monolithisch India Limited",
+  "isin": "INE1DV401010"
+ },
+ {
+  "company": "OBSC Perfection Ltd",
+  "nse_symbol": "OBSCP",
+  "bse_code": "",
+  "nse_master_name": "OBSC Perfection Limited",
+  "isin": "INE0YHV01011"
+ },
+ {
+  "company": "Sahana Systems Ltd",
+  "nse_symbol": "SAHANA",
+  "bse_code": "",
+  "nse_master_name": "Sahana System Limited",
+  "isin": "INE0LEX01011"
+ },
+ {
+  "company": "Sacheerome Ltd",
+  "nse_symbol": "SACHEEROME",
+  "bse_code": "",
+  "nse_master_name": "Sacheerome Limited",
+  "isin": "INE1ARD01016"
+ },
+ {
+  "company": "Utssav CZ Gold Jewels Ltd",
+  "nse_symbol": "UTSSAV",
+  "bse_code": "",
+  "nse_master_name": "Utssav CZ Gold Jewels Limited",
+  "isin": "INE06IJ01010"
+ },
+ {
+  "company": "KRM Ayurveda Ltd",
+  "nse_symbol": "KRMAYURVED",
+  "bse_code": "",
+  "nse_master_name": "KRM Ayurveda Limited",
+  "isin": "INE1MTV01019"
+ },
+ {
+  "company": "Aimtron Electronics Ltd",
+  "nse_symbol": "AIMTRON",
+  "bse_code": "",
+  "nse_master_name": "Aimtron Electronics Limited",
+  "isin": "INE0RUV01018"
+ },
+ {
+  "company": "Taurian MPS Ltd",
+  "nse_symbol": "TAURIAN",
+  "bse_code": "",
+  "nse_master_name": "Taurian MPS Limited",
+  "isin": "INE0XWS01018"
+ },
+ {
+  "company": "Innomet Advanced Materials Ltd",
+  "nse_symbol": "INNOMET",
+  "bse_code": "",
+  "nse_master_name": "Innomet Advanced Materials Limited",
+  "isin": "INE0S1D01010"
+ },
+ {
+  "company": "Anawil Wire and Engineering Ltd",
+  "nse_symbol": "ANAWIL",
+  "bse_code": "",
+  "nse_master_name": "Anawil Wire and Engineering Limited",
+  "isin": "INE1J5V01013"
+ },
+ {
+  "company": "Vivid Electromech Ltd",
+  "nse_symbol": "VIVIDEL",
+  "bse_code": "",
+  "nse_master_name": "Vivid Electromech Limited",
+  "isin": "INE24H301028"
+ },
+ {
+  "company": "Happy Steels Ltd",
+  "nse_symbol": "HAPPY",
+  "bse_code": "",
+  "nse_master_name": "Happy Steels Limited",
+  "isin": "INE1GFG01011"
+ },
+ {
+  "company": "BEW Engineering Ltd",
+  "nse_symbol": "BEWLTD",
+  "bse_code": "",
+  "nse_master_name": "BEW Engineering Limited",
+  "isin": "INE0HQI01014"
+ },
+ {
+  "company": "Agarwal Toughened Glass India Ltd",
+  "nse_symbol": "AGARWALTUF",
+  "bse_code": "",
+  "nse_master_name": "Agarwal Toughened Glass India Limited",
+  "isin": "INE0P8X01016"
+ },
+ {
+  "company": "Medicamen Organics Ltd",
+  "nse_symbol": "MEDIORG",
+  "bse_code": "",
+  "nse_master_name": "Medicamen Organics Limited",
+  "isin": "INE0PE401018"
+ },
+ {
+  "company": "Sadhav Shipping Ltd",
+  "nse_symbol": "SADHAV",
+  "bse_code": "",
+  "nse_master_name": "Sadhav Shipping Limited",
+  "isin": "INE0K5H01010"
+ }
+]

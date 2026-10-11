@@ -1,5 +1,5 @@
 from functools import wraps
-from flask import jsonify, current_app
+from flask import g, jsonify, current_app
 from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
 from app.models.user import User
 import requests
@@ -18,6 +18,31 @@ def admin_required(f):
             return f(*args, **kwargs)
         except Exception as e:
             return jsonify({'error': 'Token is invalid'}), 401
+
+    return decorated
+
+
+def consumer_required(f):
+    """Authenticate a consumer JWT and expose the database-backed user.
+
+    This is the non-administrative analogue of ``admin_required``. It keeps
+    the same legacy 401 payload for missing, invalid, or userless tokens and
+    places the authenticated user on ``flask.g`` for the route and the
+    entitlement-aware research service.
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        try:
+            verify_jwt_in_request()
+            user_id = get_jwt_identity()
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({"error": "Token is invalid"}), 401
+            g.current_user = user
+            return f(*args, **kwargs)
+        except Exception:
+            return jsonify({"error": "Token is invalid"}), 401
 
     return decorated
 
