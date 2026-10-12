@@ -84,6 +84,7 @@ PREMIUM_SECTION_KEYS = frozenset(
         "market_plan",
         "forecast",
         "valuations",
+        "investment_case",
     }
 )
 
@@ -100,6 +101,7 @@ ADMIN_SECTION_KEYS = frozenset(
         "market_plan",
         "forecast",
         "valuations",
+        "investment_case",
     }
 )
 
@@ -232,6 +234,30 @@ VALUATION_REFERENCE_LINE_KEYS = frozenset(
     }
 )
 
+INVESTMENT_CASE_GATE_RESULT_KEYS = frozenset(
+    {"gate", "status", "rationale", "created_at"}
+)
+INVESTMENT_CASE_KILL_SWITCH_KEYS = frozenset(
+    {"condition", "data_source_hint", "triggered_at"}
+)
+SCENARIO_RETURN_SPREAD_KEYS = frozenset(
+    {"scenarios", "upside_pct", "downside_pct"}
+)
+INVESTMENT_CASE_KEYS = frozenset(
+    {
+        "view",
+        "revision_number",
+        "expected_return_pct",
+        "expected_return_basis",
+        "as_of_date",
+        "origin",
+        "created_at",
+        "gate_results",
+        "kill_switches",
+        "scenario_return_spread",
+    }
+)
+
 FREE_DISCLOSURE_ITEM_KEYS = frozenset(
     {
         "id",
@@ -313,6 +339,9 @@ PROTECTED_FIELD_NAMES = frozenset(
         "reference_metric_basis",
         "significance_note",
         "total_items",
+        "expected_return_basis",
+        "rationale",
+        "condition",
     }
 )
 
@@ -381,6 +410,26 @@ VALUATION_SHAPE = ObjectShape(
 )
 VALUATIONS_SHAPE = ListShape(VALUATION_SHAPE, require_non_empty=True)
 
+INVESTMENT_CASE_GATE_RESULT_SHAPE = ObjectShape(INVESTMENT_CASE_GATE_RESULT_KEYS)
+INVESTMENT_CASE_KILL_SWITCH_SHAPE = ObjectShape(INVESTMENT_CASE_KILL_SWITCH_KEYS)
+# scenario_return_spread's own "scenarios" value maps BULL/BASE/BEAR to
+# either an entry dict or None (never fabricated when no scenario-tagged
+# valuation is linked -- this fixture seeds none), so it is deliberately
+# not recursed into further here; its top-level keys are still checked.
+SCENARIO_RETURN_SPREAD_SHAPE = ObjectShape(SCENARIO_RETURN_SPREAD_KEYS)
+INVESTMENT_CASE_SHAPE = ObjectShape(
+    INVESTMENT_CASE_KEYS,
+    {
+        "gate_results": ListShape(
+            INVESTMENT_CASE_GATE_RESULT_SHAPE, require_non_empty=True
+        ),
+        "kill_switches": ListShape(
+            INVESTMENT_CASE_KILL_SWITCH_SHAPE, require_non_empty=True
+        ),
+        "scenario_return_spread": SCENARIO_RETURN_SPREAD_SHAPE,
+    },
+)
+
 _SHARED_CHILD_SHAPES: dict[str, object] = {
     "company": COMPANY_SHAPE,
     "business_group": BUSINESS_GROUP_SHAPE,
@@ -396,6 +445,7 @@ _PREMIUM_CHILD_SHAPES: dict[str, object] = {
     "market_plan": MARKET_PLAN_SHAPE,
     "forecast": FORECAST_SHAPE,
     "valuations": VALUATIONS_SHAPE,
+    "investment_case": INVESTMENT_CASE_SHAPE,
 }
 
 FREE_DETAIL_SHAPE = ObjectShape(FREE_SECTION_KEYS, _SHARED_CHILD_SHAPES)

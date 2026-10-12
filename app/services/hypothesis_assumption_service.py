@@ -22,9 +22,12 @@ provenance source and reasons about exactly one driver.
 
 from __future__ import annotations
 
+import logging
+
 import sqlalchemy as sa
 
 from app import db
+from app.models.alert_types import AlertEventType, AlertSeverity
 from app.models.company import Company
 from app.models.cycle_intelligence import CompanyExposure
 from app.models.document import DocumentCompanyLink
@@ -36,7 +39,10 @@ from app.models.investment_hypothesis import (
 from app.models.research_brain import Evidence, ExtractedFact
 from app.models.research_coverage import CandidateFinding, ResearchProposition
 from app.models.research_types import InvestmentOrigin
+from app.services.alert_service import AlertService
 from app.utils.research_errors import ResearchNotFoundError, ResearchValidationError
+
+logger = logging.getLogger(__name__)
 
 _FORECAST_ASSUMPTION_PROVENANCE_FIELDS = (
     "cycle_exposure_id",
@@ -153,7 +159,8 @@ class HypothesisAssumptionService:
         supersedes_revision_id: str | None = None,
         change_reason: str | None = None,
     ) -> InvestmentHypothesis:
-        if db.session.get(Company, company_id) is None:
+        company = db.session.get(Company, company_id)
+        if company is None:
             raise ResearchNotFoundError("company_not_found", "Company was not found")
 
         citations = citations or []
@@ -249,6 +256,28 @@ class HypothesisAssumptionService:
         except Exception:
             db.session.rollback()
             raise
+
+        if supersedes_revision_id is not None:
+            try:
+                AlertService.record_event(
+                    event_type=AlertEventType.INVESTMENT_HYPOTHESIS_SUPERSEDED,
+                    source_table="investment_hypothesis",
+                    source_id=hypothesis.id,
+                    company_id=company_id,
+                    severity=AlertSeverity.WATCH,
+                    summary=f"Thesis changed for {company.display_label}: {title}",
+                    details={
+                        "supersedes_revision_id": supersedes_revision_id,
+                        "revision_number": hypothesis.revision_number,
+                    },
+                    recipient_user_ids=AlertService.admin_recipient_ids(),
+                )
+            except Exception:
+                logger.exception(
+                    "AlertService failed to record investment hypothesis "
+                    "alert for %s (business write above is unaffected)",
+                    hypothesis.id,
+                )
         return hypothesis
 
     @classmethod
