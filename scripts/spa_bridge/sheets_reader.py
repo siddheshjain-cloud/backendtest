@@ -91,14 +91,34 @@ def _sheets_credentials_from_local_file(path: str):
     )
 
 
+_REQUEST_TIMEOUT_SECONDS = 15
+
+
 def build_sheets_service():
     """Build a read-only Sheets API service.
 
     Prefers this PC's own local read-only OAuth token (see
     ``authorize_sheets_oauth.py``); falls back to ambient ADC credentials
     if no local token file is present.
+
+    Root cause investigated 2026-10-12 (SPA Continuous Monitoring V1,
+    "Resolve real Google Sheets ingestion"): this PC's network reaches
+    Google's real Sheets/OAuth endpoints over an anycast IP pool where
+    most addresses respond correctly, but occasionally a connection
+    lands on one that completes a TCP+TLS handshake yet never returns
+    an HTTP response -- confirmed via direct TLS probes and `curl`
+    against individual resolved IPs. Neither ``httplib2`` (this
+    library's own HTTP transport) nor the plain ``build()`` call below
+    configures any socket timeout, so hitting one of those addresses
+    hung forever rather than failing. This is not a credentials, DNS,
+    or proxy problem -- an explicit, bounded timeout on the transport
+    is the correct, minimal fix: a bad pick now fails fast and can be
+    retried (see ``MonitoringService``), instead of hanging the whole
+    process.
     """
 
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
     token_path = os.environ.get("SPA_SHEETS_OAUTH_TOKEN_PATH", _DEFAULT_LOCAL_TOKEN_PATH)
@@ -108,7 +128,10 @@ def build_sheets_service():
         from google.auth import default as google_auth_default
 
         credentials, _ = google_auth_default(scopes=[_SHEETS_READONLY_SCOPE])
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    authorized_http = AuthorizedHttp(
+        credentials, http=httplib2.Http(timeout=_REQUEST_TIMEOUT_SECONDS)
+    )
+    return build("sheets", "v4", http=authorized_http, cache_discovery=False)
 
 
 def manifest_spreadsheet_id() -> str:

@@ -86,14 +86,22 @@ def _drive_credentials_from_environment():
     )
 
 
+_REQUEST_TIMEOUT_SECONDS = 15
+
+
 def build_drive_service():
     """Build a read-only Drive API service.
 
     Prefers this PC's own local read-only OAuth token (see
     ``authorize_drive_readonly_oauth.py``); falls back to the production
     ``SPA_DRIVE_OAUTH_JSON`` payload only if no local token file exists.
+
+    Same bounded-timeout fix as ``sheets_reader.build_sheets_service`` --
+    see its docstring for the root cause this addresses.
     """
 
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
     token_path = os.environ.get("SPA_DRIVE_READONLY_OAUTH_TOKEN_PATH", _DEFAULT_LOCAL_TOKEN_PATH)
@@ -101,7 +109,10 @@ def build_drive_service():
         credentials = _drive_credentials_from_local_file(token_path)
     else:
         credentials = _drive_credentials_from_environment()
-    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+    authorized_http = AuthorizedHttp(
+        credentials, http=httplib2.Http(timeout=_REQUEST_TIMEOUT_SECONDS)
+    )
+    return build("drive", "v3", http=authorized_http, cache_discovery=False)
 
 
 def file_metadata(service, file_id: str) -> dict:
