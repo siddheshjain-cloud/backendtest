@@ -34,16 +34,22 @@ from app.models import (
     ValuationRevision,
 )
 from app.models.research_types import (
+    GateResultStatus,
     GovernanceFlagStatus,
     GovernanceSeverity,
     GovernanceStatus,
+    InvestmentCaseGate,
+    InvestmentCaseView,
     ManagementQuality,
     ResearchPointKind,
     ResearchTier,
     ValuationMethod,
 )
 from app.services.entitlement_service import ResearchAccessContext
+from app.services.hypothesis_assumption_service import HypothesisAssumptionService
+from app.services.investment_case_service import InvestmentCaseService
 from app.services.market_price_service import MarketPriceService
+from app.services.research_coverage_service import ResearchCoverageService
 from app.services.research_query_service import (
     PageResult,
     ResearchQueryService,
@@ -73,6 +79,7 @@ PREMIUM_DETAIL_KEYS = frozenset(
         "market_plan",
         "forecast",
         "valuations",
+        "investment_case",
     }
 )
 
@@ -868,6 +875,76 @@ def test_detail_includes_current_market_plan_forecast_and_valuations(
     ] == ["NAV"]
 
 
+def test_detail_includes_current_investment_case_gates_and_kill_switches(
+    app, seeded_company, admin_user
+):
+    """The Wealth Desk read API's own addition: the company detail
+    aggregate's ``investment_case`` section is a read-only composite
+    over InvestmentCaseService's existing query contracts -- not a new
+    write path -- and never fabricates a scenario return it cannot
+    compute (the legacy, non-scenario-tagged forecast/valuation used
+    here links to none of BULL/BASE/BEAR, so every scenario entry below
+    is correctly None, not invented)."""
+
+    company_id = seeded_company.id
+    actor = admin_user.id
+
+    research = _research_revision(company_id, actor, 1)
+    forecast = _forecast(company_id, actor, 1)
+    valuation = _valuation(company_id, actor, ValuationMethod.PE, 1)
+    db.session.commit()
+
+    proposition = ResearchCoverageService.create_proposition(
+        company_id=company_id, title="Capacity expansion", created_by_user_id=actor,
+    )
+    hypothesis = HypothesisAssumptionService.create_investment_hypothesis(
+        company_id=company_id, title="Margin recovery thesis",
+        thesis_narrative="Margins recover as spreads normalize.",
+        confidence="MEDIUM", created_by_user_id=actor,
+        citations=[{"research_proposition_id": proposition.id}],
+    )
+    case = InvestmentCaseService.create_investment_case(
+        company_id=company_id, research_revision_id=research.id,
+        investment_hypothesis_id=hypothesis.id, view=InvestmentCaseView.ADD,
+        as_of_date=AS_OF_DATE, forecast_revision_ids=[forecast.id],
+        valuation_revision_ids=[valuation.id], created_by_user_id=actor,
+        expected_return_pct=Decimal("15.0000"),
+        expected_return_basis="Base-case upside over current market cap",
+    )
+    InvestmentCaseService.record_gate_result(
+        investment_case_id=case.id, gate=InvestmentCaseGate.GOVERNANCE,
+        status=GateResultStatus.PASS, rationale="Clean record",
+        created_by_user_id=actor, research_proposition_id=proposition.id,
+    )
+    kill_switch = InvestmentCaseService.record_kill_switch(
+        investment_case_id=case.id, condition="Spread re-widens past 2026 lows",
+        created_by_user_id=actor,
+    )
+
+    aggregate = ResearchQueryService.get_company_detail(company_id, PREMIUM_CONTEXT)
+    investment_case = aggregate["investment_case"]
+
+    assert investment_case["view"] == InvestmentCaseView.ADD
+    assert investment_case["revision_number"] == 1
+    assert investment_case["expected_return_pct"] == Decimal("15.0000")
+    assert [g["gate"] for g in investment_case["gate_results"]] == [
+        InvestmentCaseGate.GOVERNANCE
+    ]
+    assert investment_case["gate_results"][0]["status"] == GateResultStatus.PASS
+    assert [k["condition"] for k in investment_case["kill_switches"]] == [
+        kill_switch.condition
+    ]
+    assert investment_case["kill_switches"][0]["triggered_at"] is None
+    assert investment_case["scenario_return_spread"]["scenarios"] == {
+        "BULL": None, "BASE": None, "BEAR": None,
+    }
+    assert investment_case["scenario_return_spread"]["upside_pct"] is None
+    assert investment_case["scenario_return_spread"]["downside_pct"] is None
+
+    free = ResearchQueryService.get_company_detail(company_id, FREE_CONTEXT)
+    assert "investment_case" not in free
+
+
 def test_premium_detail_present_null_known_missing_and_admin_allows_all(
     app, seeded_company
 ):
@@ -887,6 +964,7 @@ def test_premium_detail_present_null_known_missing_and_admin_allows_all(
         assert aggregate["market_plan"] is None
         assert aggregate["forecast"] is None
         assert aggregate["valuations"] == []
+        assert aggregate["investment_case"] is None
 
 
 def test_free_queries_never_touch_or_return_premium_relationships(

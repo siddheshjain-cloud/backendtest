@@ -665,6 +665,22 @@ class InvestmentCaseService:
         )
 
     @classmethod
+    def list_kill_switches(cls, investment_case_id: str) -> list[InvestmentCaseKillSwitch]:
+        """Every kill switch recorded for one case, oldest first.
+        Read-only, computed live -- the Wealth Desk read API's own
+        safe/reusable addition to this service's existing query
+        contracts (``get_current_gate_results``/
+        ``get_scenario_return_spread``), not a new write path."""
+
+        return list(
+            db.session.scalars(
+                sa.select(InvestmentCaseKillSwitch)
+                .where(InvestmentCaseKillSwitch.investment_case_id == investment_case_id)
+                .order_by(InvestmentCaseKillSwitch.created_at.asc())
+            ).all()
+        )
+
+    @classmethod
     def get_scenario_return_spread(cls, investment_case_id: str) -> dict:
         """Computed live from the linked Bull/Base/Bear ``ValuationRevision``s
         -- no new stored field. ``MID_CYCLE`` is excluded (§4 P3-E/P3-G).

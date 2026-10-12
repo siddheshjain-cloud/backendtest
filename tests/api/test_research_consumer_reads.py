@@ -35,14 +35,20 @@ from app.models.entitlement import (
 )
 from app.models.research_types import (
     EntitlementStatus,
+    GateResultStatus,
     GovernanceFlagStatus,
     GovernanceSeverity,
     GovernanceStatus,
+    InvestmentCaseGate,
+    InvestmentCaseView,
     ManagementQuality,
     ResearchPointKind,
     ResearchTier,
     ValuationMethod,
 )
+from app.services.hypothesis_assumption_service import HypothesisAssumptionService
+from app.services.investment_case_service import InvestmentCaseService
+from app.services.research_coverage_service import ResearchCoverageService
 
 
 UTC = timezone.utc
@@ -533,6 +539,66 @@ def test_premium_user_sees_current_research_projection(
     assert body["market_plan"]["revision"] == 2
     assert body["forecast"]["revision"] == 2
     assert body["valuations"][0]["revision"] == 2
+
+
+def test_premium_user_sees_investment_case_through_the_real_endpoint(
+    client, company, admin_user, premium_user, auth_headers
+):
+    """HTTP-level proof that the new investment_case section actually
+    serializes through the real route -- Decimal/date/datetime fields
+    included -- not just that the query-service dict shape is right."""
+
+    actor = admin_user.id
+    research = _research_revision(company.id, actor, 1, thesis="Thesis one")
+    forecast = _forecast_revision(
+        company.id, actor, 1, assumptions="Forecast one", revenue="100.0000",
+    )
+    valuation = _valuation_revision(
+        company.id, actor, 1, justified_multiple="12.0000",
+    )
+    db.session.commit()
+
+    proposition = ResearchCoverageService.create_proposition(
+        company_id=company.id, title="Capacity expansion", created_by_user_id=actor,
+    )
+    hypothesis = HypothesisAssumptionService.create_investment_hypothesis(
+        company_id=company.id, title="Margin recovery thesis",
+        thesis_narrative="Margins recover as spreads normalize.",
+        confidence="MEDIUM", created_by_user_id=actor,
+        citations=[{"research_proposition_id": proposition.id}],
+    )
+    case = InvestmentCaseService.create_investment_case(
+        company_id=company.id, research_revision_id=research.id,
+        investment_hypothesis_id=hypothesis.id, view=InvestmentCaseView.ADD,
+        as_of_date=AS_OF_DATE, forecast_revision_ids=[forecast.id],
+        valuation_revision_ids=[valuation.id], created_by_user_id=actor,
+    )
+    InvestmentCaseService.record_gate_result(
+        investment_case_id=case.id, gate=InvestmentCaseGate.GOVERNANCE,
+        status=GateResultStatus.PASS, rationale="Clean record",
+        created_by_user_id=actor, research_proposition_id=proposition.id,
+    )
+    InvestmentCaseService.record_kill_switch(
+        investment_case_id=case.id, condition="Spread re-widens",
+        created_by_user_id=actor,
+    )
+
+    response = client.get(
+        f"/api/research/companies/{company.id}",
+        headers=auth_headers(premium_user),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    investment_case = body["investment_case"]
+    assert investment_case["view"] == "ADD"
+    assert investment_case["gate_results"][0]["gate"] == "GOVERNANCE"
+    assert investment_case["gate_results"][0]["status"] == "PASS"
+    assert investment_case["kill_switches"][0]["condition"] == "Spread re-widens"
+    assert investment_case["kill_switches"][0]["triggered_at"] is None
+    assert investment_case["scenario_return_spread"]["scenarios"] == {
+        "BULL": None, "BASE": None, "BEAR": None,
+    }
 
 
 def test_admin_user_reaches_full_current_projection_without_entitlement(
