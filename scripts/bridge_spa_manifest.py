@@ -84,11 +84,21 @@ def run(
     results: list[dict] = []
     processed = 0
 
+    def _append(entry: dict) -> None:
+        """Every outcome dict also carries the row's own manifest
+        ``Document Date`` (blank if absent) -- a monitoring caller's
+        only verifiable per-row freshness signal, added here rather
+        than duplicating a second Sheets read."""
+
+        entry["document_date"] = document_date
+        results.append(entry)
+
     for row in sheets.read_tab("Documents"):
         if (row.get("Ingestion Status", "") or "").strip().upper() != "STORED":
             continue
 
         sheet_row = int(row.get("__row_number", 0) or 0)
+        document_date = (row.get("Document Date") or "").strip()
         codes = resolve_universe_codes(row, universe_identity)
 
         if only_tickers is not None:
@@ -103,7 +113,7 @@ def run(
         processed += 1
 
         if codes == MISSING_DRIVE_FOLDER_ID:
-            results.append(
+            _append(
                 {
                     "sheet_row": sheet_row,
                     "outcome": MISSING_DRIVE_FOLDER_ID,
@@ -114,7 +124,7 @@ def run(
         nse_symbol, bse_security_code = codes
         company_id = resolve_company_id(nse_symbol, bse_security_code)
         if company_id is None:
-            results.append(
+            _append(
                 {
                     "sheet_row": sheet_row,
                     "outcome": "UNRESOLVED_COMPANY",
@@ -130,13 +140,13 @@ def run(
 
         if drive_service is not None:
             if not drive_file_id:
-                results.append(
+                _append(
                     {"sheet_row": sheet_row, "outcome": "MISSING_DRIVE_FILE_ID"}
                 )
                 continue
             content, verified_sha256 = download_and_hash(drive_service, drive_file_id)
             if content_sha256 and verified_sha256 != content_sha256:
-                results.append(
+                _append(
                     {
                         "sheet_row": sheet_row,
                         "outcome": "HASH_MISMATCH",
@@ -153,7 +163,7 @@ def run(
             mime_type = metadata.get("mimeType") or mime_type
 
         if not content_sha256:
-            results.append({"sheet_row": sheet_row, "outcome": "MISSING_CONTENT_HASH"})
+            _append({"sheet_row": sheet_row, "outcome": "MISSING_CONTENT_HASH"})
             continue
 
         payload = build_document_payload(
@@ -166,20 +176,20 @@ def run(
         )
 
         if dry_run:
-            results.append({"sheet_row": sheet_row, "outcome": "DRY_RUN_OK"})
+            _append({"sheet_row": sheet_row, "outcome": "DRY_RUN_OK"})
             continue
 
         try:
             document = DocumentLibraryService.create_document(payload, actor_user_id)
         except ResearchConflictError as error:
             if error.code == "document_duplicate":
-                results.append(
+                _append(
                     {"sheet_row": sheet_row, "outcome": "ALREADY_REGISTERED"}
                 )
                 continue
             raise
         except (ResearchValidationError, ResearchNotFoundError) as error:
-            results.append(
+            _append(
                 {
                     "sheet_row": sheet_row,
                     "outcome": "REJECTED",
@@ -188,7 +198,7 @@ def run(
             )
             continue
 
-        results.append(
+        _append(
             {
                 "sheet_row": sheet_row,
                 "outcome": "REGISTERED",
