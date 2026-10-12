@@ -23,6 +23,7 @@ _PREMIUM_DETAIL_SECTIONS = frozenset(
         "market_plan",
         "forecast",
         "valuations",
+        "investment_case",
     }
 )
 

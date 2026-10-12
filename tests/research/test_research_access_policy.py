@@ -26,6 +26,7 @@ PREMIUM_SECTIONS = frozenset(
         "forecast",
         "valuation",
         "history",
+        "investment_case",
     }
 )
 

@@ -252,6 +252,76 @@ class ValuationSchema(Schema):
     )
 
 
+class InvestmentCaseGateResultSchema(Schema):
+    """One gate's current (non-superseded) assessment."""
+
+    gate = fields.Str(dump_only=True)
+    status = fields.Str(dump_only=True)
+    rationale = fields.Str(dump_only=True)
+    created_at = _UtcDateTime(dump_only=True)
+
+
+class InvestmentCaseKillSwitchSchema(Schema):
+    """One named, falsifiable kill-switch condition."""
+
+    condition = fields.Str(dump_only=True)
+    data_source_hint = fields.Str(dump_only=True, allow_none=True)
+    triggered_at = _UtcDateTime(dump_only=True, allow_none=True)
+
+
+class ScenarioReturnEntrySchema(Schema):
+    """One scenario's live-computed return, never fabricated -- null
+    fields mean the linked valuation did not carry enough data to
+    compute a return, not a zero return."""
+
+    valuation_revision_id = fields.Str(dump_only=True, allow_none=True)
+    implied_future_equity_value = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    current_market_cap = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    return_pct = fields.Decimal(as_string=True, dump_only=True, allow_none=True)
+
+
+class ScenarioReturnSpreadSchema(Schema):
+    """``InvestmentCaseService.get_scenario_return_spread``'s own
+    read-only, live-computed shape -- MID_CYCLE is deliberately excluded
+    at the service layer, not here."""
+
+    scenarios = fields.Dict(
+        keys=fields.Str(),
+        values=fields.Nested(ScenarioReturnEntrySchema, allow_none=True),
+        dump_only=True,
+    )
+    upside_pct = fields.Decimal(as_string=True, dump_only=True, allow_none=True)
+    downside_pct = fields.Decimal(as_string=True, dump_only=True, allow_none=True)
+
+
+class InvestmentCaseSchema(Schema):
+    """The current (non-superseded) InvestmentCase for one company, with
+    its gate results, kill switches, and live scenario return spread."""
+
+    view = fields.Str(dump_only=True)
+    revision_number = fields.Int(dump_only=True)
+    expected_return_pct = fields.Decimal(
+        as_string=True, dump_only=True, allow_none=True
+    )
+    expected_return_basis = fields.Str(dump_only=True, allow_none=True)
+    as_of_date = fields.Date(dump_only=True)
+    origin = fields.Str(dump_only=True)
+    created_at = _UtcDateTime(dump_only=True)
+    gate_results = fields.List(
+        fields.Nested(InvestmentCaseGateResultSchema), dump_only=True
+    )
+    kill_switches = fields.List(
+        fields.Nested(InvestmentCaseKillSwitchSchema), dump_only=True
+    )
+    scenario_return_spread = fields.Nested(
+        ScenarioReturnSpreadSchema, dump_only=True, allow_none=True
+    )
+
+
 class _CompanyDetailSchema(Schema):
     """Shared explicit company-detail fields."""
 
@@ -288,6 +358,9 @@ class CompanyPremiumSchema(_CompanyDetailSchema):
     )
     valuations = fields.List(
         fields.Nested(ValuationSchema), dump_only=True, allow_none=True
+    )
+    investment_case = fields.Nested(
+        InvestmentCaseSchema, dump_only=True, allow_none=True
     )
 
 

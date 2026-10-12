@@ -18,11 +18,26 @@ from app.models.governance import GovernanceFlag
 from app.models.market_plan import MarketPlanRevision
 from app.models.ownership import OwnershipSnapshot
 from app.models.research import ResearchPoint, ResearchRevision
+from app.models.investment_case import (
+    InvestmentCase,
+    InvestmentCaseForecast,
+    InvestmentCaseGateResult,
+    InvestmentCaseKillSwitch,
+    InvestmentCaseValuation,
+)
+from app.models.investment_hypothesis import (
+    InvestmentHypothesis,
+    InvestmentHypothesisCitation,
+)
+from app.models.research_coverage import ResearchProposition
 from app.models.research_types import (
     EntitlementStatus,
+    GateResultStatus,
     GovernanceFlagStatus,
     GovernanceSeverity,
     GovernanceStatus,
+    InvestmentCaseGate,
+    InvestmentCaseView,
     ManagementQuality,
     ResearchPointKind,
     ResearchTier,
@@ -209,6 +224,7 @@ def research_security_matrix(app):
         {"section": "forecast", "required_tier": "PREMIUM"},
         {"section": "governance", "required_tier": "PREMIUM"},
         {"section": "history", "required_tier": "PREMIUM"},
+        {"section": "investment_case", "required_tier": "PREMIUM"},
         {"section": "management", "required_tier": "PREMIUM"},
         {"section": "market_plan", "required_tier": "PREMIUM"},
         {"section": "ownership", "required_tier": "PREMIUM"},
@@ -436,6 +452,78 @@ def research_security_matrix(app):
         )
     )
 
+    proposition = ResearchProposition(
+        company_id=company.id,
+        title="SENTINEL-INVESTMENT-CASE-PROPOSITION",
+        created_by_user_id=actor.id,
+    )
+    db.session.add(proposition)
+    db.session.flush()
+
+    hypothesis = InvestmentHypothesis(
+        company_id=company.id,
+        title="SENTINEL-INVESTMENT-CASE-HYPOTHESIS-TITLE",
+        thesis_narrative="SENTINEL-INVESTMENT-CASE-THESIS-NARRATIVE",
+        confidence="MEDIUM",
+        revision_number=1,
+        supersedes_revision_id=None,
+        change_reason=None,
+        created_by_user_id=actor.id,
+    )
+    db.session.add(hypothesis)
+    db.session.flush()
+    db.session.add(
+        InvestmentHypothesisCitation(
+            investment_hypothesis_id=hypothesis.id,
+            research_proposition_id=proposition.id,
+        )
+    )
+
+    investment_case = InvestmentCase(
+        company_id=company.id,
+        research_revision_id=research.id,
+        investment_hypothesis_id=hypothesis.id,
+        view=InvestmentCaseView.ADD,
+        expected_return_pct=Decimal("15.0000"),
+        expected_return_basis="SENTINEL-INVESTMENT-CASE-RETURN-BASIS",
+        as_of_date=as_of_date,
+        revision_number=1,
+        supersedes_case_id=None,
+        change_reason=None,
+        created_by_user_id=actor.id,
+    )
+    db.session.add(investment_case)
+    db.session.flush()
+    db.session.add(
+        InvestmentCaseForecast(
+            investment_case_id=investment_case.id,
+            forecast_revision_id=forecast.id,
+        )
+    )
+    db.session.add(
+        InvestmentCaseValuation(
+            investment_case_id=investment_case.id,
+            valuation_revision_id=valuation.id,
+        )
+    )
+    db.session.add(
+        InvestmentCaseGateResult(
+            investment_case_id=investment_case.id,
+            gate=InvestmentCaseGate.GOVERNANCE,
+            status=GateResultStatus.PASS,
+            rationale="SENTINEL-INVESTMENT-CASE-GATE-RATIONALE",
+            research_proposition_id=proposition.id,
+            created_by_user_id=actor.id,
+        )
+    )
+    db.session.add(
+        InvestmentCaseKillSwitch(
+            investment_case_id=investment_case.id,
+            condition="SENTINEL-INVESTMENT-CASE-KILL-SWITCH-CONDITION",
+            created_by_user_id=actor.id,
+        )
+    )
+
     disclosure_significance_marker = (
         "SENTINEL-DISCLOSURE-SIGNIFICANCE"
     )
@@ -635,6 +723,9 @@ def research_security_matrix(app):
         "SENTINEL-VALUATION-REFERENCE-BASIS",
         "998877.5000",
         "999999.0000",
+        "SENTINEL-INVESTMENT-CASE-RETURN-BASIS",
+        "SENTINEL-INVESTMENT-CASE-GATE-RATIONALE",
+        "SENTINEL-INVESTMENT-CASE-KILL-SWITCH-CONDITION",
         research_thesis_marker,
     ]
 

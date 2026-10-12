@@ -34,6 +34,7 @@ from app.models import (
     ValuationReferenceLine,
     ValuationRevision,
 )
+from app.models.investment_case import InvestmentCase
 from app.models.research_types import (
     ResearchPointKind,
     ValuationMethod,
@@ -41,6 +42,7 @@ from app.models.research_types import (
 from app.policies.document_access import DocumentAccessPolicy
 from app.policies.research_access import ResearchAccessPolicy
 from app.services.entitlement_service import ResearchAccessContext
+from app.services.investment_case_service import InvestmentCaseService
 from app.services.market_price_service import MarketPriceService
 from app.utils.research_errors import (
     ResearchForbiddenError,
@@ -69,6 +71,7 @@ _AGGREGATE_SECTION_KEYS = {
     "market_plan": "market_plan",
     "forecast": "forecast",
     "valuations": "valuation",
+    "investment_case": "investment_case",
 }
 
 _HISTORY_SECTIONS = frozenset(
@@ -387,6 +390,11 @@ class ResearchQueryService:
             payload["valuations"] = [
                 _valuation_dict(valuation) for valuation in valuations
             ]
+        if "investment_case" in allowed:
+            case = InvestmentCaseService.get_current_investment_case(company_id)
+            payload["investment_case"] = (
+                None if case is None else _investment_case_dict(case)
+            )
 
         return payload
 
@@ -817,6 +825,51 @@ def _valuation_dict(revision: ValuationRevision) -> dict[str, object]:
             }
             for line in revision.reference_lines
         ],
+    }
+
+
+def _investment_case_dict(case: InvestmentCase) -> dict[str, object]:
+    """The current InvestmentCase plus its gate results, kill switches,
+    and live scenario return spread -- a read-only aggregate over
+    ``InvestmentCaseService``'s own existing query contracts, not a
+    new write path. Never fabricates: a scenario with no linked
+    valuation, or a kill switch never triggered, is represented as
+    ``None``/empty, exactly as ``InvestmentCaseService`` itself
+    already guarantees."""
+
+    gate_results = InvestmentCaseService.get_current_gate_results(case.id)
+    kill_switches = InvestmentCaseService.list_kill_switches(case.id)
+    spread = InvestmentCaseService.get_scenario_return_spread(case.id)
+    return {
+        "view": case.view,
+        "revision_number": case.revision_number,
+        "expected_return_pct": case.expected_return_pct,
+        "expected_return_basis": case.expected_return_basis,
+        "as_of_date": case.as_of_date,
+        "origin": case.origin,
+        "created_at": case.created_at,
+        "gate_results": [
+            {
+                "gate": result.gate,
+                "status": result.status,
+                "rationale": result.rationale,
+                "created_at": result.created_at,
+            }
+            for result in gate_results
+        ],
+        "kill_switches": [
+            {
+                "condition": switch.condition,
+                "data_source_hint": switch.data_source_hint,
+                "triggered_at": switch.triggered_at,
+            }
+            for switch in kill_switches
+        ],
+        "scenario_return_spread": {
+            "scenarios": spread["scenarios"],
+            "upside_pct": spread["upside_pct"],
+            "downside_pct": spread["downside_pct"],
+        },
     }
 
 
