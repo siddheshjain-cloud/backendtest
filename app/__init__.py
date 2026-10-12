@@ -135,12 +135,14 @@ def create_app(
         from app.routes.documents import documents_bp
         from app.routes.admin_research import admin_research_bp, admin_entitlements_bp
         from app.routes.admin_documents import admin_documents_bp
+        from app.routes.admin_alerts import admin_alerts_bp
 
         app.register_blueprint(research_bp, url_prefix='/api/research')
         app.register_blueprint(documents_bp, url_prefix='/api/research')
         app.register_blueprint(admin_research_bp, url_prefix='/api/admin/research')
         app.register_blueprint(admin_documents_bp, url_prefix='/api/admin/research')
         app.register_blueprint(admin_entitlements_bp, url_prefix='/api/admin/users')
+        app.register_blueprint(admin_alerts_bp, url_prefix='/api/admin/alerts')
 
     # Error handlers
     from app.utils.error_handlers import register_error_handlers

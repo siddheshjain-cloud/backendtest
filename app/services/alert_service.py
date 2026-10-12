@@ -225,6 +225,24 @@ class AlertService:
         )
 
     @classmethod
+    def list_recent_events(cls, *, limit: int = 50) -> list[AlertEvent]:
+        """Read-only, computed live. The most recent alert-worthy
+        occurrences across every source, newest first -- the feed an
+        admin-facing "Daily Brief" reads from. Deliberately source-
+        agnostic (Trade, InvestmentCase, GovernanceFlag, Monitoring,
+        etc. all interleave by recency) rather than one feed per
+        source type, since that is exactly what a single "what
+        happened recently" view needs."""
+
+        return list(
+            db.session.scalars(
+                sa.select(AlertEvent)
+                .order_by(AlertEvent.occurred_at.desc())
+                .limit(limit)
+            ).all()
+        )
+
+    @classmethod
     def list_unresolved_deliveries(cls) -> list[AlertDelivery]:
         """Read-only. Every delivery still ``PENDING`` or already
         ``FAILED`` -- the set a future recovery process could act on.
