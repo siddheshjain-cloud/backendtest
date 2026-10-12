@@ -80,6 +80,19 @@ def run(
     sheets = ManifestSheetsReader(build_sheets_service(), manifest_spreadsheet_id())
     universe_identity = build_universe_identity_index(sheets.read_tab("Universe"))
     drive_service = build_drive_service() if verify_hash else None
+    # Lazily built, reused across every row needing metadata-only Drive
+    # lookups (the non-verify_hash path below) -- root cause investigated
+    # 2026-10-12 (SPA Continuous Monitoring V1, "Resolve real Google Sheets
+    # ingestion"): rebuilding a fresh authenticated Drive client (credential
+    # load + new TCP/TLS handshake) for every single row measured ~1.5-2.4s
+    # each against this PC's real network; across a few hundred real rows
+    # that alone adds minutes of wall-clock time, independent of and on top
+    # of the one-off per-call network latency itself (which is real Google
+    # API latency, not something this codebase can reduce further). Reusing
+    # one client is the same fix already applied correctly to
+    # ``build_sheets_service()`` above -- this just closes the one spot
+    # that didn't yet do it.
+    metadata_drive_service = None
 
     results: list[dict] = []
     processed = 0
@@ -158,7 +171,9 @@ def run(
             content_sha256 = verified_sha256
             file_size_bytes = len(content)
         elif drive_file_id:
-            metadata = file_metadata(build_drive_service(), drive_file_id)
+            if metadata_drive_service is None:
+                metadata_drive_service = build_drive_service()
+            metadata = file_metadata(metadata_drive_service, drive_file_id)
             file_size_bytes = int(metadata.get("size") or 0) or None
             mime_type = metadata.get("mimeType") or mime_type
 
