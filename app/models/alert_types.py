@@ -105,6 +105,17 @@ class AlertEventType:
     CYCLE_ASSESSMENT_SUPERSEDED = "CYCLE_ASSESSMENT_SUPERSEDED"
     INVESTMENT_HYPOTHESIS_SUPERSEDED = "INVESTMENT_HYPOTHESIS_SUPERSEDED"
 
+    # Continuous Research Monitoring V1 (document detection only --
+    # deliberately distinct from every event type above, which all
+    # describe a Research/Investment Brain *interpretation*. These three
+    # describe the scan mechanism itself: whether it ran, what it saw,
+    # and whether its own upstream source looked current. Each
+    # ``MonitoringRun`` row is a fresh id every run, so -- like Alert-2/3
+    # -- no per-transition naming trick is needed for uniqueness.
+    MONITORING_RUN_DOCUMENTS_DETECTED = "MONITORING_RUN_DOCUMENTS_DETECTED"
+    MONITORING_RUN_FAILED = "MONITORING_RUN_FAILED"
+    MONITORING_MANIFEST_STALE = "MONITORING_MANIFEST_STALE"
+
 
 def enum_type(name: str, values: Sequence[str]) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, validate_strings=True)

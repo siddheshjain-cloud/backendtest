@@ -43,6 +43,7 @@ from .investment_hypothesis import (
 )
 from .forecast_revision_assumption import ForecastRevisionAssumption
 from .alert import AlertDelivery, AlertEvent
+from .monitoring import MonitoringRun
 from .investment_case import (
     InvestmentCase,
     InvestmentCaseForecast,
