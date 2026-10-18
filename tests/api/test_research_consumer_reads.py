@@ -423,11 +423,33 @@ def _add_entitlement(
 # ---------------------------------------------------------------------------
 
 
-def test_consumer_research_routes_require_jwt(client):
+def test_company_list_and_detail_no_longer_require_a_jwt(client):
+    """Anonymous public-access proposal §2.1: these two routes run
+    optional_consumer, not consumer_required -- a missing Authorization
+    header resolves to the PUBLIC tier rather than being rejected. See
+    tests/security/test_public_research_access.py for the PUBLIC-tier
+    response shape itself; this just pins that the route no longer 401s."""
+
     response = client.get("/api/research/companies")
 
-    assert response.status_code == 401
-    assert response.get_json() == {"error": "Token is invalid"}
+    assert response.status_code == 200
+
+
+def test_disclosures_and_history_still_require_jwt(client, company):
+    """Unlike the list/detail routes above, these were not part of the
+    anonymous public-access proposal and must still reject a missing
+    token exactly as before."""
+
+    disclosures = client.get(f"/api/research/companies/{company.id}/disclosures")
+    assert disclosures.status_code == 401
+    assert disclosures.get_json() == {"error": "Token is invalid"}
+
+    history = client.get(
+        f"/api/research/companies/{company.id}/history",
+        query_string={"section": "research"},
+    )
+    assert history.status_code == 401
+    assert history.get_json() == {"error": "Token is invalid"}
 
 
 def test_consumer_research_routes_reject_invalid_jwt(client):

@@ -337,6 +337,14 @@ class CompanyFreeSchema(_CompanyDetailSchema):
     """Free company detail: company, assigned group label, quote, access."""
 
 
+class CompanyPublicSchema(_CompanyDetailSchema):
+    """Anonymous (PUBLIC-tier) company detail: identity, group label, quote,
+    and access metadata only. Its own schema object, not a reuse of
+    ``CompanyFreeSchema`` -- today both are equally sparse because
+    ``PUBLIC_SECTIONS`` is empty, but FREE's own section set can grow
+    independently of PUBLIC's without this schema silently following it."""
+
+
 class CompanyPremiumSchema(_CompanyDetailSchema):
     """Premium company detail: every current premium research section."""
 

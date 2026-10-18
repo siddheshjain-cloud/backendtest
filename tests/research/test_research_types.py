@@ -7,6 +7,7 @@ from app.models.research_types import (
     GovernanceSeverity,
     GovernanceStatus,
     ManagementQuality,
+    PublicResearchStatus,
     ResearchPointKind,
     ResearchTier,
     ValuationMethod,
@@ -20,7 +21,15 @@ def public_values(classification):
 
 
 def test_closed_research_classifications_expose_only_approved_machine_values():
-    assert public_values(ResearchTier) == {"FREE": "FREE", "PREMIUM": "PREMIUM"}
+    assert public_values(ResearchTier) == {
+        "FREE": "FREE",
+        "PREMIUM": "PREMIUM",
+        "PUBLIC": "PUBLIC",
+    }
+    assert public_values(PublicResearchStatus) == {
+        "NOT_PUBLIC": "NOT_PUBLIC",
+        "PUBLISHED": "PUBLISHED",
+    }
     assert public_values(EntitlementStatus) == {
         "ACTIVE": "ACTIVE",
         "INACTIVE": "INACTIVE",

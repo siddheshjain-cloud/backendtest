@@ -36,7 +36,9 @@ from app.models import (
 )
 from app.models.investment_case import InvestmentCase
 from app.models.research_types import (
+    PublicResearchStatus,
     ResearchPointKind,
+    ResearchTier,
     ValuationMethod,
 )
 from app.policies.document_access import DocumentAccessPolicy
@@ -241,7 +243,6 @@ class ResearchQueryService:
     ) -> PageResult:
         """Paginated entitlement-safe company summaries."""
 
-        del context
         _validate_page_bounds(page, per_page)
 
         display_label = sa.func.coalesce(
@@ -250,6 +251,15 @@ class ResearchQueryService:
         statement = sa.select(Company).join(
             Ticker, Company.ticker_id == Ticker.id
         )
+
+        if context.tier == ResearchTier.PUBLIC:
+            # An anonymous reader never sees an unpublished company, even
+            # in a list -- same gate as the detail route, applied here so
+            # a list request can't be used to enumerate unpublished names.
+            statement = statement.where(
+                Company.public_research_status
+                == PublicResearchStatus.PUBLISHED
+            )
 
         if sector is not None:
             statement = statement.where(Company.sector == sector)
@@ -309,6 +319,18 @@ class ResearchQueryService:
             )
         )
         if company is None:
+            raise ResearchNotFoundError(
+                "company_not_found", "Company was not found"
+            )
+        if (
+            context.tier == ResearchTier.PUBLIC
+            and company.public_research_status
+            != PublicResearchStatus.PUBLISHED
+        ):
+            # Same "company not found" error an unpublished/nonexistent
+            # company already returns to anyone else -- an anonymous
+            # caller must never be able to tell "doesn't exist" apart
+            # from "exists but isn't published yet".
             raise ResearchNotFoundError(
                 "company_not_found", "Company was not found"
             )

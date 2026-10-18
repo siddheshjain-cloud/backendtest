@@ -47,18 +47,36 @@ FORBIDDEN_IMPORT_PREFIXES = (
 # The exact, reviewed M1 route surface. A route appearing or disappearing
 # here without this file being updated is exactly the regression this test
 # exists to catch.
+#
+# GET /api/research/companies and GET /api/research/companies/<id> are
+# deliberately NOT here as of the anonymous public-access proposal
+# (§2.1): they run optional_consumer, not consumer_required, so a request
+# with no Authorization header is allowed through (resolving to the
+# PUBLIC tier) rather than rejected. See
+# ANONYMOUS_ALLOWED_ROUTES/test_anonymous_allowed_routes_permit_a_missing_
+# token_but_still_reject_an_invalid_one below for their own explicit,
+# narrower contract.
 JWT_REQUIRED_ROUTES = (
-    ("GET", "/api/research/companies"),
-    ("GET", "/api/research/companies/<id>"),
     ("GET", "/api/research/companies/<id>/disclosures"),
     ("GET", "/api/research/companies/<id>/documents"),
     ("GET", "/api/research/companies/<id>/history"),
     ("GET", "/api/research/documents/<id>"),
 )
 
+# The exact, reviewed set of routes allowed to run without a JWT at all.
+# Still rejects an invalid/expired token exactly like every JWT-required
+# route -- this only widens "no token", never "bad token". Any other
+# route moving here must be a deliberate edit to this file, same
+# discipline as JWT_REQUIRED_ROUTES/ADMIN_REQUIRED_ROUTES above.
+ANONYMOUS_ALLOWED_ROUTES = (
+    ("GET", "/api/research/companies"),
+    ("GET", "/api/research/companies/<id>"),
+)
+
 ADMIN_REQUIRED_ROUTES = (
     ("POST", "/api/admin/research/companies"),
     ("PATCH", "/api/admin/research/companies/<id>"),
+    ("PATCH", "/api/admin/research/companies/<id>/public-research-status"),
     ("POST", "/api/admin/research/companies/<id>/disclosures"),
     ("POST", "/api/admin/research/companies/<id>/forecast-revisions"),
     ("POST", "/api/admin/research/companies/<id>/governance-flags"),
@@ -174,6 +192,22 @@ def _resolve(path_template: str) -> str:
 def test_every_m1_route_requires_a_jwt(client, method, path):
     response = client.open(_resolve(path), method=method, json={})
     assert response.status_code == 401, (method, path, response.status_code)
+
+
+@pytest.mark.parametrize("method,path", ANONYMOUS_ALLOWED_ROUTES)
+def test_anonymous_allowed_routes_permit_a_missing_token_but_still_reject_an_invalid_one(
+    client, method, path
+):
+    missing = client.open(_resolve(path), method=method, json={})
+    assert missing.status_code != 401, (method, path, missing.status_code)
+
+    invalid = client.open(
+        _resolve(path),
+        method=method,
+        json={},
+        headers={"Authorization": "Bearer not-a-valid-token"},
+    )
+    assert invalid.status_code == 401, (method, path, invalid.status_code)
 
 
 @pytest.mark.parametrize("method,path", ADMIN_REQUIRED_ROUTES)

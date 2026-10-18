@@ -116,6 +116,7 @@ def test_company_table_has_exact_columns_nullability_and_indexed_sector_and_indu
         "business_group_id": True,
         "business_group_basis": True,
         "business_group_source_reference": True,
+        "public_research_status": False,
     }
 
     inspector = sa.inspect(db.engine)

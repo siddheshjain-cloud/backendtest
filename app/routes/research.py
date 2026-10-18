@@ -14,7 +14,7 @@ from app.schemas.research_consumer import (
 from app.services.entitlement_service import EntitlementService
 from app.services.research_presenter import ResearchPresenter
 from app.services.research_query_service import ResearchQueryService
-from app.utils.auth import consumer_required
+from app.utils.auth import consumer_required, optional_consumer
 from app.utils.research_errors import research_error_boundary
 
 
@@ -22,13 +22,19 @@ research_bp = Blueprint("research", __name__)
 
 
 def _access_context():
-    """Resolve research access from the authenticated consumer user only."""
+    """Resolve research access from ``g.current_user``.
 
-    return EntitlementService.resolve(g.current_user)
+    Set by either decorator: ``consumer_required`` always sets a real
+    user; ``optional_consumer`` sets ``None`` for an anonymous request.
+    ``resolve_optional`` handles both without the route needing to know
+    which decorator ran.
+    """
+
+    return EntitlementService.resolve_optional(g.current_user)
 
 
 @research_bp.route("/companies", methods=["GET"])
-@consumer_required
+@optional_consumer
 @research_error_boundary
 def list_research_companies():
     query = load_consumer_query(CompanyListQuerySchema(), request.args)
@@ -45,7 +51,7 @@ def list_research_companies():
 
 
 @research_bp.route("/companies/<company_id>", methods=["GET"])
-@consumer_required
+@optional_consumer
 @research_error_boundary
 def get_research_company(company_id: str):
     context = _access_context()

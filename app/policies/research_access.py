@@ -31,6 +31,13 @@ PREMIUM_SECTIONS = frozenset(
     }
 )
 
+# Sections ever shown to an unauthenticated (PUBLIC-tier) reader. Empty by
+# default -- a section becomes public only via a separate, later, explicit
+# decision to move it here, never by inheriting FREE_SECTIONS automatically.
+# Kept as its own named constant, the same convention FREE_SECTIONS and
+# PREMIUM_SECTIONS already use, rather than a derived subset.
+PUBLIC_SECTIONS = frozenset()
+
 ALL_RESEARCH_SECTIONS = FREE_SECTIONS | PREMIUM_SECTIONS
 
 
@@ -43,6 +50,8 @@ class ResearchAccessPolicy:
     ) -> frozenset[str]:
         if context.is_admin or context.tier == ResearchTier.PREMIUM:
             return ALL_RESEARCH_SECTIONS
+        if context.tier == ResearchTier.PUBLIC:
+            return PUBLIC_SECTIONS
         return FREE_SECTIONS
 
     @staticmethod
@@ -51,6 +60,16 @@ class ResearchAccessPolicy:
     ) -> list[dict[str, str]]:
         if context.is_admin or context.tier == ResearchTier.PREMIUM:
             return []
+        if context.tier == ResearchTier.PUBLIC:
+            locked = [
+                {"section": section, "required_tier": ResearchTier.FREE}
+                for section in sorted(FREE_SECTIONS - PUBLIC_SECTIONS)
+            ]
+            locked.extend(
+                {"section": section, "required_tier": ResearchTier.PREMIUM}
+                for section in sorted(PREMIUM_SECTIONS)
+            )
+            return locked
         return [
             {"section": section, "required_tier": ResearchTier.PREMIUM}
             for section in sorted(PREMIUM_SECTIONS)

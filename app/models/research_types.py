@@ -6,6 +6,25 @@ import sqlalchemy as sa
 class ResearchTier:
     FREE = "FREE"
     PREMIUM = "PREMIUM"
+    # Unauthenticated-request-only. Never a valid ``UserEntitlement.tier``
+    # value -- that column's own enum_type() below is declared with only
+    # (FREE, PREMIUM) and rejects anything else via validate_strings=True,
+    # so PUBLIC can never be persisted as a real entitlement no matter what
+    # resolves a ResearchAccessContext. It only ever comes from
+    # EntitlementService.resolve_optional(None).
+    PUBLIC = "PUBLIC"
+
+
+class PublicResearchStatus:
+    """Whether a company's research may ever be shown to an anonymous
+    (PUBLIC-tier) reader. Independent of ``ResearchAccessPolicy``'s
+    section gating: this decides whether *this company* is visible to
+    PUBLIC at all; PUBLIC_SECTIONS decides which sections are ever
+    visible to PUBLIC, for any company. Set only via an explicit admin
+    action -- never inferred from a company having research content."""
+
+    NOT_PUBLIC = "NOT_PUBLIC"
+    PUBLISHED = "PUBLISHED"
 
 
 class EntitlementStatus:

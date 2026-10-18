@@ -17,7 +17,7 @@ from app.models.user import User
 class ResearchAccessContext:
     """Immutable research access context for one resolved request."""
 
-    user_id: str
+    user_id: str | None
     is_admin: bool
     tier: str
 
@@ -66,3 +66,19 @@ class EntitlementService:
         ).one_or_none()
         tier = resolve_effective_tier(row, check_time)
         return ResearchAccessContext(user.id, bool(user.is_admin), tier)
+
+    @staticmethod
+    def resolve_optional(
+        user: User | None, at: datetime | None = None
+    ) -> ResearchAccessContext:
+        """Resolve access for a route that also serves anonymous readers.
+
+        A real user resolves exactly as ``resolve`` already does -- this
+        never changes behavior for an authenticated caller. No user (no
+        JWT at all on the request) resolves to the PUBLIC tier without
+        touching the database, never to FREE and never by raising.
+        """
+
+        if user is None:
+            return ResearchAccessContext(None, False, ResearchTier.PUBLIC)
+        return EntitlementService.resolve(user, at)
