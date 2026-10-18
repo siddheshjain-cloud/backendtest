@@ -19,6 +19,7 @@ from app.models.research_types import (
     GovernanceSeverity,
     GovernanceStatus,
     ManagementQuality,
+    PublicResearchStatus,
     ResearchPointKind,
     ResearchTier,
     ValuationMethod,
@@ -157,6 +158,20 @@ class EntitlementPutSchema(_StrictRequestSchema):
     )
     valid_from = fields.DateTime(load_default=None, allow_none=True)
     valid_until = fields.DateTime(load_default=None, allow_none=True)
+
+
+class PublicResearchStatusPutSchema(_StrictRequestSchema):
+    """The only admin write path onto ``Company.public_research_status``."""
+
+    status = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            (
+                PublicResearchStatus.NOT_PUBLIC,
+                PublicResearchStatus.PUBLISHED,
+            )
+        ),
+    )
 
 
 class OwnershipSnapshotCreateSchema(_StrictRequestSchema):
@@ -332,6 +347,7 @@ class CompanyResponseSchema(Schema):
     business_group_source_reference = fields.Str(
         dump_only=True, allow_none=True
     )
+    public_research_status = fields.Str(dump_only=True)
     created_at = _UtcDateTime(dump_only=True)
     updated_at = _UtcDateTime(dump_only=True)
 

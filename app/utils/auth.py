@@ -47,6 +47,38 @@ def consumer_required(f):
     return decorated
 
 
+def optional_consumer(f):
+    """Resolve an optional consumer session for an anonymous-readable route.
+
+    Unlike ``consumer_required``, a request with no Authorization header at
+    all is not an error -- it proceeds with ``g.current_user = None``,
+    which ``EntitlementService.resolve_optional`` turns into the PUBLIC
+    tier. A header that *is* present but invalid or expired still fails
+    exactly as ``consumer_required`` already does: this only widens "no
+    token", never "bad token".
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        try:
+            verify_jwt_in_request(optional=True)
+        except Exception:
+            return jsonify({"error": "Token is invalid"}), 401
+
+        user_id = get_jwt_identity()
+        if user_id is None:
+            g.current_user = None
+            return f(*args, **kwargs)
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "Token is invalid"}), 401
+        g.current_user = user
+        return f(*args, **kwargs)
+
+    return decorated
+
+
 def get_current_user():
     try:
         verify_jwt_in_request()

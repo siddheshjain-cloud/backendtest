@@ -19,6 +19,10 @@ APPROVED_M1_ROUTES = {
     ("GET", "/api/research/documents/<document_id>"),
     ("POST", "/api/admin/research/companies"),
     ("PATCH", "/api/admin/research/companies/<company_id>"),
+    (
+        "PATCH",
+        "/api/admin/research/companies/<company_id>/public-research-status",
+    ),
     ("POST", "/api/admin/research/companies/<company_id>/disclosures"),
     (
         "POST",

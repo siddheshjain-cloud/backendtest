@@ -45,6 +45,10 @@ def _admin_context(tier: str = ResearchTier.FREE) -> ResearchAccessContext:
     return ResearchAccessContext("admin-1", True, tier)
 
 
+def _public_context() -> ResearchAccessContext:
+    return ResearchAccessContext(None, False, ResearchTier.PUBLIC)
+
+
 def test_free_allowed_sections_are_exactly_public_sections():
     assert (
         ResearchAccessPolicy.allowed_sections(_free_context())
@@ -95,3 +99,37 @@ def test_free_locked_sections_are_deterministic_and_reveal_only_metadata():
 def test_premium_and_admin_contexts_have_no_locked_sections():
     assert ResearchAccessPolicy.locked_sections(_premium_context()) == []
     assert ResearchAccessPolicy.locked_sections(_admin_context()) == []
+
+
+def test_public_allowed_sections_are_exactly_public_sections():
+    """PUBLIC_SECTIONS is empty today -- an anonymous reader is allowed
+    none of the current FREE or PREMIUM sections. This pins that the
+    empty default is real, not an oversight: it must change only via a
+    deliberate edit to PUBLIC_SECTIONS, never implicitly."""
+
+    assert ResearchAccessPolicy.allowed_sections(_public_context()) == frozenset()
+
+
+def test_public_locked_sections_list_every_free_and_premium_section():
+    locked = ResearchAccessPolicy.locked_sections(_public_context())
+
+    expected = [
+        {"section": section, "required_tier": ResearchTier.FREE}
+        for section in sorted(FREE_SECTIONS)
+    ] + [
+        {"section": section, "required_tier": ResearchTier.PREMIUM}
+        for section in sorted(PREMIUM_SECTIONS)
+    ]
+    assert locked == expected
+    assert len(locked) == len(FREE_SECTIONS) + len(PREMIUM_SECTIONS)
+    assert all(set(item) == {"section", "required_tier"} for item in locked)
+
+
+def test_unknown_tier_is_distinct_from_public_and_still_fails_closed_to_free():
+    """PUBLIC is an explicit branch, not "any non-PREMIUM tier" -- an
+    unrelated unknown tier string must keep failing closed to FREE_SECTIONS
+    exactly as it already did, never fall into the PUBLIC branch."""
+
+    context = ResearchAccessContext("user-4", False, "GOLD")
+
+    assert ResearchAccessPolicy.allowed_sections(context) == FREE_SECTIONS

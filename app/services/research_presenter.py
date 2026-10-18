@@ -10,6 +10,7 @@ from app.schemas.research import (
     CompanyAdminSchema,
     CompanyFreeSchema,
     CompanyPremiumSchema,
+    CompanyPublicSchema,
 )
 from app.services.entitlement_service import ResearchAccessContext
 
@@ -37,6 +38,8 @@ def _schema_type(
         return CompanyAdminSchema
     if context.tier == ResearchTier.PREMIUM:
         return CompanyPremiumSchema
+    if context.tier == ResearchTier.PUBLIC:
+        return CompanyPublicSchema
     return CompanyFreeSchema
 
 
@@ -45,6 +48,8 @@ def _access_tier(context: ResearchAccessContext) -> str:
         return "ADMIN"
     if context.tier == ResearchTier.PREMIUM:
         return ResearchTier.PREMIUM
+    if context.tier == ResearchTier.PUBLIC:
+        return ResearchTier.PUBLIC
     return ResearchTier.FREE
 
 

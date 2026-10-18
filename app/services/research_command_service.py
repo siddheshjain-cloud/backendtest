@@ -37,6 +37,7 @@ from app.models.research_types import (
     GovernanceSeverity,
     GovernanceStatus,
     ManagementQuality,
+    PublicResearchStatus,
     ResearchPointKind,
     ResearchTier,
     Scenario,
@@ -300,6 +301,38 @@ class ResearchCommandService:
                 "company_identity_conflict",
                 "Company identity already exists",
             ) from None
+        return company
+
+    @classmethod
+    def set_public_research_status(
+        cls, company_id: str, actor_user_id: str, status: str
+    ) -> Company:
+        """The only write path onto ``Company.public_research_status``.
+
+        Admin-only at the route layer (``admin_required``). Deliberately
+        separate from ``update_company`` -- this is a publication-lifecycle
+        decision with a closed value set, not a company-identity field, the
+        same reason ``upsert_entitlement`` is its own method rather than a
+        branch of ``update_company``.
+        """
+
+        del actor_user_id  # actor enforcement arrives with later tasks.
+        if status not in (
+            PublicResearchStatus.NOT_PUBLIC,
+            PublicResearchStatus.PUBLISHED,
+        ):
+            raise ResearchValidationError(
+                {"status": ["Must be one of the approved values"]}
+            )
+
+        company = db.session.get(Company, company_id)
+        if company is None:
+            raise ResearchNotFoundError(
+                "company_not_found", "Company was not found"
+            )
+
+        company.public_research_status = status
+        db.session.commit()
         return company
 
     @classmethod

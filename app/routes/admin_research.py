@@ -25,6 +25,7 @@ from app.schemas.admin_research import (
     MarketPlanRevisionResponseSchema,
     OwnershipSnapshotCreateSchema,
     OwnershipSnapshotResponseSchema,
+    PublicResearchStatusPutSchema,
     ResearchRevisionCreateSchema,
     ResearchRevisionResponseSchema,
     ValuationRevisionCreateSchema,
@@ -68,6 +69,20 @@ def update_research_company(company_id: str):
     payload = _request_payload(CompanyPatchSchema())
     company = ResearchCommandService.update_company(
         company_id, payload, _actor_user_id()
+    )
+    return jsonify(CompanyResponseSchema().dump(company)), 200
+
+
+@admin_research_bp.route(
+    "/companies/<company_id>/public-research-status",
+    methods=["PATCH"],
+)
+@admin_required
+@research_error_boundary
+def update_public_research_status(company_id: str):
+    payload = _request_payload(PublicResearchStatusPutSchema())
+    company = ResearchCommandService.set_public_research_status(
+        company_id, _actor_user_id(), payload["status"]
     )
     return jsonify(CompanyResponseSchema().dump(company)), 200
 

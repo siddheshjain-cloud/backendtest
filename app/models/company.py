@@ -8,6 +8,7 @@ import sqlalchemy as sa
 import sqlalchemy.orm as so
 
 from app.models.base import BaseModel
+from app.models.research_types import PublicResearchStatus, enum_type
 
 
 def _utcnow() -> datetime:
@@ -75,6 +76,15 @@ class Company(BaseModel):
     )
     business_group_source_reference: so.Mapped[str | None] = so.mapped_column(
         sa.String(1000), nullable=True
+    )
+    public_research_status: so.Mapped[str] = so.mapped_column(
+        enum_type(
+            "company_public_research_status",
+            (PublicResearchStatus.NOT_PUBLIC, PublicResearchStatus.PUBLISHED),
+        ),
+        nullable=False,
+        default=PublicResearchStatus.NOT_PUBLIC,
+        server_default=PublicResearchStatus.NOT_PUBLIC,
     )
     updated_at: so.Mapped[datetime] = so.mapped_column(
         sa.DateTime(timezone=True),
